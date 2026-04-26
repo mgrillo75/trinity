@@ -30,6 +30,9 @@ Sprint C (orchestrate): #260 ✅ → #271 ✅ → #264 ✅ → [#294 PAUSED] →
 Sprint D (simplify):    #306 ✅ → #428 (CAPACITY-CONSOLIDATE) → #429 (CLEANUP-COLLAPSE)
                         #430 ✅ (parallel — process engine deleted; archive on branch archive/process-engine)
                         (and #408 dissolves once #428 lands — verified 2026-04-24: long-running call still present, #306 alone insufficient)
+Sprint D′ (harden):     #524 (state machine) → unblocks #429's terminal-writer guarantee
+                        #525 (idempotency keys) — parallel
+                        #526 (dispatch circuit breaker) — parallel; better with #307
 Sprint E (telemetry):   #307
 Sprint F (scale):       #24, #18
 ```
@@ -48,6 +51,62 @@ Sprint F (scale):       #24, #18
 
 - ~~**#226 + #61**~~: #226 shipped (PR #323). #61 remains — wire backend cleanup into agent's existing terminate endpoint.
 - **#305**: tracing. Can now build on #286's preserved error context (shipped in PR #324) — trace ID can be appended to the combined error message.
+
+---
+
+## Target architecture: actor model (destination)
+
+**Added 2026-04-26.** The tier-by-tier work above is the *path*. This section names the *destination* so each step has a coherent direction. Not a rewrite proposal — most components already exist in the right shape; they're wired as fallbacks rather than as the primary path.
+
+**The destination is the actor model.** Each agent is an actor with:
+
+1. **A mailbox** — durable per-agent inbox. Other agents and external triggers drop messages here. The mailbox *is* the queue; there is no separate dispatch path.
+2. **A journal** — append-only record in the agent's git repo. Replayable. Source of truth for "what happened to this agent," not a central platform table.
+3. **A processor** — pulls from mailbox, executes, appends to journal, emits reply messages. Configurable parallelism regulates throughput.
+
+The platform's job collapses to four things: deliver messages, supervise actors, project journals into observability (UI, audit), and translate human-facing sync (chat, webhook) into async messages via edge adapters.
+
+### Why this is reachable, not a rewrite
+
+| Actor model concept | Trinity component today | Gap to close |
+|---|---|---|
+| Mailbox | `BacklogService` (SQLite FIFO) | Today fires only on overflow — make it the only path in |
+| Processor + parallelism | `SlotService` (Redis ZSET) | Already correct in shape; becomes inbox consumer rate |
+| Journal | Agent git repo + `~/.trinity/operator-queue.json` | Generalize: every workflow checkpoint commits to repo |
+| Message transport | `EventBus` / Redis Streams (#306) | Add typed message envelope |
+| Single-writer state | `ExecutionStateProjector` (#524) | Projector = journal-to-DB mapping |
+| At-least-once delivery | Idempotency keys (#525) | Required by the protocol |
+| Per-actor health gate | Dispatch circuit breaker (#526) | Stops feeding mailboxes of dead actors |
+| Auto-scaling signal | Inbox depth | Falls out for free once mailbox is the only path |
+
+Rewiring, not rebuilding. Nothing on this list gets thrown away.
+
+### Transition roadmap (gated, evidence-driven)
+
+**Phase 1 — Ship Sprint D + D′ as planned.** Every issue in those sprints (#428, #429, #524, #525, #526) bends the architecture toward the actor model. **Do not pause to redesign — this *is* the path.**
+
+**Phase 2 — Prove the model on one boundary.** Pick the smallest, lowest-risk surface: **MCP `chat_with_agent` (agent → agent only)**. Route it through `BacklogService` as a typed message instead of as a sync HTTP call. One sprint. Same agent code on both sides. Human-facing `/chat` untouched.
+
+**Phase 3 — Decision gate.** Read the result honestly:
+- If message-passing is clearly simpler (fewer slots/timeouts/cleanup paths) and latency is acceptable → fold next boundary (`/task`, then schedules, then webhooks).
+- If hidden complexity surfaces (backpressure, discovery, debugging) → stay on the planned path. Sprint D + D′ still leaves the system in a much better place than today.
+
+**Phase 4 — Human chat stays sync via edge adapter.** WebSocket holds open, drops a message in the agent's inbox, waits for the reply, forwards it. Looks sync to the human; underneath it's async. Sync semantics live in a thin shim, not in the core.
+
+### Non-goals (explicitly)
+
+- Flag-day rewrite. The current platform stays load-bearing throughout.
+- Replacing components that already work in actor-shape (`SlotService`, `EventBus`, `BacklogService`).
+- Touching human-facing chat UX. Edge-adapter latency is acceptable; redesigning browser interactions is not on the table.
+
+### Pre-experiment artifact
+
+Before scheduling Phase 2, write one page with two sections:
+
+1. **Message envelope** — fields every inter-agent message carries (e.g., `id`, `from`, `to`, `correlation_id`, `causation_id`, `kind`, `payload`, `idempotency_key`, `deadline`).
+2. **Journal format** — what the agent appends to its repo per processed message (`journal.ndjson`? structured `state.yaml` per workflow?).
+
+If both fit cleanly on a postcard, the model is sound and Phase 2 proceeds. If either sprawls, the model isn't ready and the planned path remains the best one available.
 
 ---
 
@@ -182,6 +241,41 @@ Worst case: new paths break and we fall back to existing paths. Old code gets de
 
 ---
 
+## Tier 2.6 — Reliability hardening (Sprint D′) — **NEW (2026-04-26)**
+
+**Goal:** Close the three architectural gaps that survive even after Sprint D ships. Surfaced from a structural critique (2026-04-26): the unified funnel, push transport, and consolidated capacity manager fix the *plumbing*, but leave three contract-level holes — split state authority, no producer idempotency, and no producer-side health gating. These don't dissolve out of #428/#429; they need their own work.
+
+### Sequencing within Sprint D′
+
+```
+#524 (state machine contract) ─► prerequisite to #429 deletion of cleanup phases
+                              ─► enables single-writer guarantee by construction
+#525 (idempotency keys)         parallel — independent of state machine
+                              ─► most acute for webhooks (#291) and scheduler dispatch
+#526 (dispatch circuit breaker) consumes #307 heartbeat (Tier 3) when available
+                              ─► can ship with failure-rate detection alone first
+```
+
+| # | Title | Why it's here |
+|---|-------|---------------|
+| **#524** | **Agent-authoritative execution state machine (RELIABILITY-005)** | Defines the contract that #306 transports and #429 leans on. Agent emits typed `ExecutionStateEvent`s with structured `error_code` (replacing stderr regex); single backend `ExecutionStateProjector` is the only writer to `schedule_executions.status` for non-create transitions. Removes the multi-writer race by construction, not by re-verify patches. **Prerequisite to actually deleting the cleanup phases in #429** rather than just hiding them. |
+| **#525** | **Idempotency keys at trigger boundaries (RELIABILITY-006)** | `Idempotency-Key` header on every producer (chat, task, internal/scheduler, webhooks #291, MCP, event-sub, self-exec). Backend stores `(key → execution_id)` for 24h and short-circuits duplicates. Webhook trigger auto-derives a key from `(token, body_hash)` for naive senders. Scheduler uses `(schedule_id, fire_time)`. **The unified funnel makes duplicates more uniform — this is the missing dedup layer.** |
+| **#526** | **Per-agent dispatch circuit breaker (RELIABILITY-007)** | Producer-side breaker in front of `SlotService` / `BacklogService`. Opens on rolling failure rate; fast-fails 503 instead of enqueuing into a doomed backlog. Drains existing backlog on trip with `circuit_open` reason. Distinct from #304 (closed — agent-to-agent) and #307 (heartbeat *signal*); this is the **consumer** of that signal. |
+
+### Architectural shift
+
+**Before Sprint D′:** Status column has ~12 writers patched by Phase 3 re-verify. Webhook re-deliveries and scheduler-to-backend network blips silently produce duplicate executions. Agent with expired auth keeps draining slots and queuing 50 doomed tasks until somebody notices.
+
+**After Sprint D′:** Agent emits canonical state events; backend has one projector that is the only `status` writer. Every trigger boundary accepts `Idempotency-Key`; duplicates short-circuit. Unhealthy agent trips a breaker within seconds and starts fast-failing 503; backlog is never poisoned.
+
+### Verification gates before exiting Tier 2.6
+
+- Invariant test asserts no execution has a FAILED→SUCCESS or double-terminal transition in `audit_log` over a 30-day window.
+- Idempotent replay rate observable in logs/metrics; webhook duplicate-storm test (10 retries within 1 s) produces exactly one execution.
+- Forced failure injection (revoke an agent's API key) → circuit opens within 60 s and existing backlog drains with `circuit_open` failures, not 24-hour timeouts.
+
+---
+
 ## Tier 3 — Remaining push telemetry (Sprint E)
 
 **Goal:** Finish the polling-to-push migration that #306 started.
@@ -221,6 +315,28 @@ Worst case: new paths break and we fall back to existing paths. Old code gets de
 ### Out of scope (intentionally separate)
 
 - **Process Engine** has its own execution surface: `process_engine/engine/handlers/agent_task.py` calls `AgentClient.chat()` directly, bypassing `TaskExecutionService`, slot service, and cleanup service. It is intentionally outside this consolidation. Slot/timeout/PID work in Tier 0 does not apply to process steps. *Known limitation:* a process kicking off many parallel `agent_task` steps will not respect agent capacity. **File a tracking issue** (suggested title: "Process Engine `agent_task` should funnel through TaskExecutionService") so this surfaces in grooming rather than rotting inside this doc.
+
+---
+
+## Future considerations (not yet ranked, surfaced 2026-04-26)
+
+These are real architectural gaps surfaced by the same critique that produced Tier 2.6. They're recorded here so they don't rot — promote to issues when the symptoms warrant or when Sprint D′ exits and we have head-room. Roughly ordered by leverage.
+
+1. **Persist agent-side `ProcessRegistry` across restarts.** Today it's pure in-memory. A container crash loses PIDs, log buffer, and `/last-error` source — exactly when an operator most needs them. Write-through to a small SQLite file in the container, or have the agent re-emit "I'm running these IDs" on startup. ~100-line change, outsized recovery value. (Largely subsumed by #524 if the projector mirrors agent state durably; revisit after #524 lands.)
+
+2. **Move retry into `TaskExecutionService`, classified by `error_code`.** Today only the scheduler retries (#271). Webhook, MCP, chat, fan-out, event-sub do not. The funnel already knows the typed `error_code`; only `NETWORK` and rate-limit `CAPACITY` should auto-retry. Producers should not have retry policies at all. *Pairs with #525 (idempotency) — retries inside the funnel must not duplicate.*
+
+3. **Synchronous ack on terminate, with escalation.** Today: SIGINT, 5 s wait, hope. Replace with: backend SIGINT → agent confirms receipt → agent confirms process-group reaped → backend marks terminated. Bounded budget (~10 s) before escalating to container restart, instead of waiting up to 5 min for cleanup to notice.
+
+4. **Two streams, not one.** Split `trinity:events` into `trinity:ui-events` (lossy, MAXLEN-trimmed, live UI fan-out) and `trinity:audit-events` (durable, never trimmed, persisted to `audit_log`). Today slow WS clients can cause audit data to disappear silently because both share `MAXLEN ~10000`. The transports have different reliability requirements; treating them as one quietly costs observability.
+
+5. **Fairness primitive in `CapacityManager` (#428).** When the three queues collapse, don't ship pure FIFO — add per-user / per-subscription token buckets so one tenant can't saturate a shared agent. Hard to retrofit later; cheap to design in while #428 is live work.
+
+6. **Producer-side backpressure on `EventBus`.** Today `XADD` never blocks producers; under sustained pressure, `MAXLEN ~10000` silently trims and slow clients are evicted. No producer flow control. Consider bounded-blocking publish or a separate audit lane (overlaps with #4 above).
+
+7. **A single "execution lifecycle" contract document.** One page: states, allowed transitions, who's authorized to write each one, what events get emitted. The implicit-across-files version is exactly why the system grew 12 status writers nobody could name. (Becomes maintenance work after #524 lands — write the contract document while building it.)
+
+These are recommendations, not commitments. Re-read this list at each sprint planning checkpoint.
 
 ---
 
@@ -340,3 +456,5 @@ New triggers, all funnel into the same executor:
 12. ~~**Next (current):** Pick up **#428 (CAPACITY-CONSOLIDATE)** once #306 has ≥2 weeks of clean soak (zero orphan recoveries, push success ≥99.9%). In parallel, pick up **#430 (PROCESS-ENGINE-DECISION)** — no soak dependency, unblocks #291.~~ ✅ **#430 shipped (2026-04-24)**: Option B (delete) executed. Process engine archived on `archive/process-engine` branch. **Next:** pick up **#291 (WEBHOOK-001)** — now unblocked — and **#428 (CAPACITY-CONSOLIDATE)** once soak completes.
 13. **Re-evaluate #408** — #306 is live, so the predicted dissolution condition now holds. Verify no long-running HTTP call remains in `TaskExecutionService` and close as dissolved (no direct code change needed).
 14. **Then:** #429 (CLEANUP-COLLAPSE) gated on #428 landing + continued clean soak — the riskiest step per §"Additive-first migration."
+15. **New (2026-04-26): Tier 2.6 hardening** — pick up **#524 (state machine contract)** as prerequisite to actually deleting cleanup phases in #429; **#525 (idempotency keys)** in parallel (most acute for webhooks #291); **#526 (dispatch circuit breaker)** parallel, sharpens further when #307 heartbeat ships. See *Tier 2.6 — Reliability hardening* and *Future considerations* sections.
+16. **New (2026-04-26): Phase 2 actor-model experiment (parallel to Sprint D′).** First write the pre-experiment postcard (message envelope + journal format). If it fits cleanly, scope and run the smallest test — convert MCP `chat_with_agent` (agent→agent only) to message-passing through `BacklogService`. See *Target architecture: actor model* for the full transition roadmap and decision gate.
