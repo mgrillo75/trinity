@@ -932,6 +932,53 @@ def _classify_signal_exit(
     return (504, detail)
 
 
+def _classify_empty_result(
+    metadata: Optional['ExecutionMetadata'] = None,
+    raw_message_count: int = 0,
+) -> Optional[Tuple[int, str]]:
+    """Classify a clean (return_code == 0) exit that produced no result message.
+
+    Issue #520: When the claude subprocess exits 0 but the final
+    ``{"type":"result"}`` JSON line was dropped before the reader thread
+    captured it (typical cause: an MCP tool / child subprocess inherited
+    stdout, kept the pipe open past claude's exit, the reader leaked,
+    pgroup unwind closed the pipe, the result line went with it), the
+    metadata fields populated *only* by the result message — ``cost_usd``
+    and ``duration_ms`` — stay ``None``. Returning HTTP 200 here would
+    have agent-server log "completed successfully" while backend silently
+    reaps the execution as an orphan minutes later, masking the real
+    failure with misleading diagnostics.
+
+    Sibling of ``_classify_signal_exit`` (issue #516): both classify
+    "subprocess plumbing dropped the result" cases that the success path
+    would otherwise mishandle. The two-field check (``cost_usd`` AND
+    ``duration_ms`` both ``None``) is conservative — single-field
+    nullability could be a Claude format quirk; both-None is a strong
+    signal that the terminal ``result`` message never arrived.
+
+    Returns ``(status_code, detail)`` for empty-result exits, or ``None``
+    if metadata looks well-formed (caller proceeds with the normal
+    response-building path).
+    """
+    if metadata is None:
+        return None
+    if metadata.cost_usd is not None or metadata.duration_ms is not None:
+        return None
+
+    tool_count = metadata.tool_count or 0
+    num_turns = metadata.num_turns or 0
+    detail = (
+        f"Execution completed without a result message after {tool_count} tool calls "
+        f"/ {num_turns} turns (raw_messages={raw_message_count}). "
+        f"Likely cause: a tool or child subprocess inherited stdout and prevented "
+        f"the claude reader thread from capturing the final result block. "
+        f"Check agent-server logs for 'Reader thread(s) stuck after process exit' or "
+        f"'I/O operation on closed file' near this execution. "
+        f"This is a transient infrastructure failure; retry the task."
+    )
+    return (502, detail)
+
+
 def get_execution_lock():
     """Get the execution lock for chat endpoint"""
     return _execution_lock
@@ -1356,6 +1403,19 @@ async def execute_headless_task(
                     status_code=500,
                     detail=f"Task execution failed (exit code {return_code}): {error_preview[:300]}"
                 )
+
+            # Issue #520: Clean exit (return_code == 0) but the final `result` JSON
+            # line never reached the reader thread — typically because a child
+            # subprocess inherited stdout. metadata.cost_usd / duration_ms stay
+            # None, the watchdog ends up reaping the execution minutes later, and
+            # the agent-server log misleadingly claims "completed successfully".
+            # Surface this as 502 so backend records it as FAILED with a useful
+            # diagnostic rather than dispatching an empty 200.
+            empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages))
+            if empty_result is not None:
+                status_code, detail = empty_result
+                logger.error(f"[Headless Task] {detail}")
+                raise HTTPException(status_code=status_code, detail=detail)
 
             # Build final response text
             response_text = "\n".join(response_parts) if response_parts else ""

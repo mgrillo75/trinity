@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-26 | #516, #520 | Agent error classification — `_classify_signal_exit()` (504 for SIGINT/SIGKILL/SIGTERM, was misread as 503 auth) and `_classify_empty_result()` (502 when clean exit drops the final result message, was silent 200 + watchdog reap) | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md), [task-execution-service.md](feature-flows/task-execution-service.md) |
 | 2026-04-26 | #498 | Sync `/task` long-poll on backlog — sync parallel calls at capacity now spill to BACKLOG-001 (same backlog as async) and long-poll the open HTTP connection until terminal status (cap `2 × effective_timeout`); new `services/sync_waiter.py` owns the in-process registry + event/poll-fallback wait helper | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
 | 2026-04-24 | WEBHOOK-001 (#291) | Webhook triggers — token-authenticated public URL fires schedule executions | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
 | 2026-04-25 | #487 | Telegram file upload Phase 2 — workspace delivery hardening: NFKC sanitizer with collision dedup, spec injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`, all-writes-failed channel error + abort. Same code path benefits Slack inbound. | [telegram-integration.md](feature-flows/telegram-integration.md), [slack-file-sharing.md](feature-flows/slack-file-sharing.md) |
