@@ -1,41 +1,60 @@
 # Feature Flow: Subscription Auto-Switch (SUB-003)
 
 > **Requirement**: `docs/requirements/SUB-003-subscription-auto-switch.md`
-> **Issue**: #153
-> **Status**: Implemented (2026-03-21)
+> **Issue**: #153, threshold + scope update #441
+> **Status**: Implemented (2026-03-21), updated 2026-04-25 (#441)
 
 ## Overview
 
-Automatically switches an agent to a different subscription when it encounters 2+ consecutive rate-limit (429) errors from the Claude API. Opt-in via system setting.
+Automatically switches an agent to a different subscription on the first
+subscription failure — either a rate-limit (429) **or** an auth-class
+failure (401/403/credit balance/expired token). Default ON (opt-out via
+system setting `auto_switch_subscriptions`).
 
 ## Flow
 
 ```
-Agent container detects rate limit → returns 429 to backend
+Agent container detects rate limit OR auth failure → returns 429/503 to backend
     ↓
-Backend catches 429 in:
-  - TaskExecutionService.execute_task() [schedules, MCP, agent-to-agent]
-  - chat_with_agent() [interactive chat]
-  - background task handler [async tasks]
+Backend catches the failure in:
+  - TaskExecutionService.execute_task()  [schedules, MCP, agent-to-agent, async]
+  - chat_with_agent()                     [interactive chat sync path]
     ↓
-subscription_auto_switch.handle_rate_limit_error(agent_name)
+Classify:
+  - 429 → handle_subscription_failure(..., failure_kind="rate_limit")
+  - 503 OR is_auth_failure(error_msg) → handle_subscription_failure(..., failure_kind="auth")
     ↓
 Check: setting enabled? → No → return None
     ↓ Yes
 Check: agent has subscription? → No → return None
     ↓ Yes
-Record rate-limit event, get consecutive count
+Record failure event, get count (informational; no threshold gate)
     ↓
-Count < 2? → return None (wait for more)
-    ↓ ≥ 2
-Find best alternative subscription (fewest agents, not rate-limited)
+Find best alternative subscription (fewest agents, not rate-limited in last 2h)
     ↓
 No alternative? → return None (log warning)
     ↓ Found
 Switch: DB update + container restart + log activity + send notification
     ↓
-Return switch result to caller → 429 response includes auto_switch info
+Return switch result → caller surfaces 429/503 with auto_switch info + retry hint
 ```
+
+## Trigger Surface
+
+| Layer | Signal | Failure kind |
+|-------|--------|--------------|
+| HTTP 429 from agent | rate-limit reached | `rate_limit` |
+| HTTP 503 from agent | auth failure (#285 detection) | `auth` |
+| Error message matches `AUTH_INDICATORS` | credit balance / expired token / unauthorized / etc. | `auth` |
+
+`AUTH_INDICATORS` (canonical list in
+`src/backend/services/subscription_auto_switch.py::is_auth_failure`):
+`credit balance`, `unauthorized`, `authentication`, `credentials`,
+`forbidden`, `401`, `403`, `oauth`, `token expired`, `not authenticated`.
+
+The scheduler service (`src/scheduler/service.py`) maintains a duplicate
+copy of this list because it runs in a separate container and cannot
+import from `backend.services`. Keep the two in sync when editing either.
 
 ## Files
 
@@ -71,7 +90,7 @@ Return switch result to caller → 429 response includes auto_switch info
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `auto_switch_subscriptions` | `"false"` | Enable/disable auto-switch |
+| `auto_switch_subscriptions` | `"true"` (#441) | Enable/disable auto-switch |
 
 ## API Endpoints
 
@@ -114,8 +133,8 @@ anyway, so the omission was silent.
 
 ## Edge Cases
 
-- **All subscriptions exhausted**: No switch, error surfaces as normal 429. `_perform_auto_switch` does **not** clear rate-limit events for the old subscription — those events are the signal that keeps `is_subscription_rate_limited()` truthful, so the just-drained sub is not offered as a candidate on the next cycle (issue #444).
+- **All subscriptions exhausted**: No switch, error surfaces as normal 429/503. `_perform_auto_switch` does **not** clear rate-limit events for the old subscription — those events are the signal that keeps `is_subscription_rate_limited()` truthful, so the just-drained sub is not offered as a candidate on the next cycle (issue #444).
 - **API key agents**: Auto-switch only applies to subscription-based agents
-- **Flip-flopping**: 2-consecutive-error requirement prevents immediate re-switch
+- **Flip-flopping** (#441 update): the 2h skip-list (`is_subscription_rate_limited` ∧ `select_best_alternative_subscription`) is now the only thrash guard. Pre-#441 the threshold also required 2 consecutive 429s before switching, but that gated user-visible failures unnecessarily — the skip-list alone is sufficient because a just-drained sub stays flagged for 2h post-switch.
 - **Concurrent switches**: SQLite serialization prevents races
 - **Cleanup**: Records older than 24h are pruned hourly by `CleanupService` (phase 6, #476); the 2h "is rate-limited" window drives candidate filtering independently of cleanup

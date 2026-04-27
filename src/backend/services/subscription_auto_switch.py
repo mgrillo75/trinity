@@ -1,18 +1,27 @@
 """
 Subscription Auto-Switch Service (SUB-003).
 
-Automatically switches an agent to a different subscription when it
-encounters repeated rate-limit errors (2+ consecutive).
+Automatically switches an agent to a different subscription on the first
+subscription failure — either a rate-limit (429) or an auth-class error
+(401/403/credit balance/expired token, etc.).
 
 Preconditions (all must be true):
-1. Setting "auto_switch_subscriptions" is enabled
+1. Setting "auto_switch_subscriptions" is enabled (default: on, opt-out)
 2. Agent has a subscription assigned (not API key)
-3. 2+ consecutive rate-limit errors on this (agent, subscription)
+3. At least one rate-limit / auth event recorded for this (agent, subscription)
 4. At least one alternative subscription is available and not rate-limited
+
+Threshold note (#441): pre-#441 we required 2+ consecutive 429s before
+switching. That guaranteed at least one user-visible failure on long-running
+schedules and never fired on auth-class breakage at all. The 2h skip-list on
+alternative selection (`select_best_alternative_subscription` +
+`is_subscription_rate_limited`) is what prevents thrashing — see
+`tests/unit/test_subscription_auto_switch_pingpong.py` for the regression
+tests pinning that contract.
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 from database import db
 from db_models import NotificationCreate
@@ -20,20 +29,53 @@ from db_models import NotificationCreate
 logger = logging.getLogger(__name__)
 
 
-async def handle_rate_limit_error(
+# Substrings that indicate an auth-class subscription failure. Mirrors the
+# scheduler's classification at `src/scheduler/service.py` (which now imports
+# this same list to keep the two surfaces from drifting).
+AUTH_INDICATORS = [
+    "credit balance",
+    "unauthorized",
+    "authentication",
+    "credentials",
+    "forbidden",
+    "401",
+    "403",
+    "oauth",
+    "token expired",
+    "not authenticated",
+]
+
+
+def is_auth_failure(error_message: str) -> bool:
+    """Return True if `error_message` contains any AUTH_INDICATORS substring."""
+    if not error_message:
+        return False
+    error_lower = error_message.lower()
+    return any(ind in error_lower for ind in AUTH_INDICATORS)
+
+
+async def handle_subscription_failure(
     agent_name: str,
     error_message: str = "",
+    failure_kind: str = "rate_limit",
 ) -> Optional[dict]:
     """
-    Called when a 429 rate-limit error is received from an agent.
+    Called when a subscription-backed agent fails with either a rate-limit (429)
+    or an auth-class error.
 
-    Records the event and triggers auto-switch if all preconditions are met.
+    Records the event and triggers auto-switch on the first occurrence (subject
+    to the alternative being viable per the 2h skip-list).
+
+    Args:
+        agent_name: name of the agent that failed
+        error_message: server-side error string for audit + notification text
+        failure_kind: "rate_limit" (429) or "auth" (401/403/credit/etc.)
 
     Returns:
         dict with switch details if auto-switch occurred, None otherwise.
     """
-    # 1. Check if auto-switch is enabled
-    enabled = db.get_setting_value("auto_switch_subscriptions", default="false") == "true"
+    # 1. Check if auto-switch is enabled (default: on, #441)
+    enabled = db.get_setting_value("auto_switch_subscriptions", default="true") == "true"
     if not enabled:
         return None
 
@@ -42,30 +84,28 @@ async def handle_rate_limit_error(
     if not current_sub_id:
         return None
 
-    # 3. Record the rate-limit event and get consecutive count
+    # 3. Record the failure event in the rate-limit table. Auth-class events
+    # share the same table — the table tracks "subscription failure events"
+    # generically; `is_subscription_rate_limited` treats any event in the 2h
+    # window as a reason to skip the subscription as a candidate, which is the
+    # behavior we want for both kinds of failure.
     consecutive_count = db.record_rate_limit_event(
         agent_name=agent_name,
         subscription_id=current_sub_id,
-        error_message=error_message
+        error_message=error_message,
     )
-
-    if consecutive_count < 2:
-        logger.info(
-            f"[SUB-003] Rate-limit event #{consecutive_count} for agent '{agent_name}' "
-            f"on subscription {current_sub_id} — waiting for 2+ before auto-switch"
-        )
-        return None
 
     # 4. Find a viable alternative subscription
     alternative = db.select_best_alternative_subscription(current_sub_id)
     if not alternative:
         logger.warning(
-            f"[SUB-003] Agent '{agent_name}' has {consecutive_count} consecutive rate-limit errors "
-            f"but no viable alternative subscription found"
+            f"[SUB-003] Agent '{agent_name}' hit a {failure_kind} failure on "
+            f"subscription {current_sub_id} (event #{consecutive_count}) "
+            f"but no viable alternative subscription is available"
         )
         return None
 
-    # Get current subscription name for logging
+    # Get current subscription name for logging / notification
     current_sub = db.get_subscription(current_sub_id)
     old_name = current_sub.name if current_sub else current_sub_id
 
@@ -75,8 +115,31 @@ async def handle_rate_limit_error(
         old_subscription_id=current_sub_id,
         old_subscription_name=old_name,
         new_subscription=alternative,
-        consecutive_count=consecutive_count,
+        failure_kind=failure_kind,
+        event_count=consecutive_count,
     )
+
+
+async def handle_rate_limit_error(
+    agent_name: str,
+    error_message: str = "",
+) -> Optional[dict]:
+    """Backward-compatible shim — delegates to `handle_subscription_failure`
+    with `failure_kind="rate_limit"`. Existing 429 callers don't need to
+    migrate atomically.
+    """
+    return await handle_subscription_failure(
+        agent_name=agent_name,
+        error_message=error_message,
+        failure_kind="rate_limit",
+    )
+
+
+def _failure_phrase(failure_kind: str) -> str:
+    """Notification + log wording per failure kind."""
+    if failure_kind == "auth":
+        return "an authentication failure"
+    return "a rate-limit error"
 
 
 async def _perform_auto_switch(
@@ -84,14 +147,16 @@ async def _perform_auto_switch(
     old_subscription_id: str,
     old_subscription_name: str,
     new_subscription,
-    consecutive_count: int,
+    failure_kind: str,
+    event_count: int,
 ) -> dict:
     """
     Execute the subscription switch: DB update, container restart, log, notify.
     """
+    phrase = _failure_phrase(failure_kind)
     logger.info(
         f"[SUB-003] Auto-switching agent '{agent_name}' from '{old_subscription_name}' "
-        f"to '{new_subscription.name}' after {consecutive_count} consecutive rate-limit errors"
+        f"to '{new_subscription.name}' after {phrase}"
     )
 
     # Switch subscription in DB
@@ -122,14 +187,15 @@ async def _perform_auto_switch(
             "action": "subscription_auto_switch",
             "old_subscription": old_subscription_name,
             "new_subscription": new_subscription.name,
-            "consecutive_errors": consecutive_count,
+            "failure_kind": failure_kind,
+            "event_count": event_count,
             "restart_result": restart_result,
-        }
+        },
     )
     await activity_service.complete_activity(
         activity_id=activity_id,
         status=ActivityState.COMPLETED,
-        details={"message": f"Auto-switched from '{old_subscription_name}' to '{new_subscription.name}'"}
+        details={"message": f"Auto-switched from '{old_subscription_name}' to '{new_subscription.name}'"},
     )
 
     # Send notification to agent owner
@@ -141,16 +207,16 @@ async def _perform_auto_switch(
                 title=f"Subscription auto-switched to '{new_subscription.name}'",
                 message=(
                     f"Agent '{agent_name}' was automatically switched from subscription "
-                    f"'{old_subscription_name}' to '{new_subscription.name}' after "
-                    f"{consecutive_count} consecutive rate-limit errors."
+                    f"'{old_subscription_name}' to '{new_subscription.name}' after {phrase}."
                 ),
                 priority="high",
                 category="subscription",
                 metadata={
                     "old_subscription": old_subscription_name,
                     "new_subscription": new_subscription.name,
-                    "consecutive_errors": consecutive_count,
-                }
+                    "failure_kind": failure_kind,
+                    "event_count": event_count,
+                },
             )
         )
     except Exception as e:
@@ -161,7 +227,8 @@ async def _perform_auto_switch(
         "agent_name": agent_name,
         "old_subscription": old_subscription_name,
         "new_subscription": new_subscription.name,
-        "consecutive_errors": consecutive_count,
+        "failure_kind": failure_kind,
+        "event_count": event_count,
         "restart_result": restart_result,
     }
 

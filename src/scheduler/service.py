@@ -30,6 +30,33 @@ from .locking import get_lock_manager, LockManager
 logger = logging.getLogger(__name__)
 
 
+# Substrings indicating an auth-class subscription failure. Mirrors
+# `src/backend/services/subscription_auto_switch.py::AUTH_INDICATORS` —
+# the scheduler runs in a separate container and cannot import from
+# backend.services, so this list is duplicated by necessity. Keep the
+# two in sync when editing either side.
+_AUTH_INDICATORS = [
+    "credit balance",
+    "unauthorized",
+    "authentication",
+    "credentials",
+    "forbidden",
+    "401",
+    "403",
+    "oauth",
+    "token expired",
+    "not authenticated",
+]
+
+
+def _is_auth_failure(error_msg: str) -> bool:
+    """Return True if `error_msg` matches any AUTH_INDICATORS substring."""
+    if not error_msg:
+        return False
+    error_lower = error_msg.lower()
+    return any(ind in error_lower for ind in _AUTH_INDICATORS)
+
+
 class SchedulerService:
     """
     Manages scheduled task execution for agents.
@@ -775,15 +802,7 @@ class SchedulerService:
                 # with failure status, but we still need to detect auth errors
                 # for logging and update schedule run times
                 if error_msg:
-                    auth_indicators = [
-                        "credit balance", "unauthorized", "authentication",
-                        "credentials", "forbidden", "401", "403",
-                        "oauth", "token expired", "not authenticated"
-                    ]
-                    error_lower = error_msg.lower()
-                    is_auth_failure = any(ind in error_lower for ind in auth_indicators)
-
-                    if is_auth_failure:
+                    if _is_auth_failure(error_msg):
                         logger.error(
                             f"Schedule {schedule.name} execution failed due to authentication error: {error_msg}"
                         )
@@ -1028,15 +1047,7 @@ class SchedulerService:
             else:
                 # Log auth failures specially for diagnostics
                 if error_msg:
-                    auth_indicators = [
-                        "credit balance", "unauthorized", "authentication",
-                        "credentials", "forbidden", "401", "403",
-                        "oauth", "token expired", "not authenticated"
-                    ]
-                    error_lower = error_msg.lower()
-                    is_auth_failure = any(ind in error_lower for ind in auth_indicators)
-
-                    if is_auth_failure:
+                    if _is_auth_failure(error_msg):
                         logger.error(
                             f"Background poll: execution {execution_id} failed due to auth error: {error_msg}"
                         )

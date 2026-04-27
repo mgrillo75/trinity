@@ -305,3 +305,231 @@ class TestRateLimitAging:
         assert pruned == 2
         # Fresh event still flags the subscription
         assert sub_ops.is_subscription_rate_limited("sub-a") is True
+
+
+# =============================================================================
+# #441 regression: single failure triggers switch (threshold 1) + auth path
+# =============================================================================
+#
+# These tests exercise `services.subscription_auto_switch` directly. That
+# module does `from database import db` at top level, which would normally
+# instantiate a real `DatabaseManager` (open SQLite, run migrations, ensure
+# admin user). For unit tests we stub `database` and `db_models` in
+# sys.modules BEFORE the import, so the service module gets a controllable
+# fake `db` and zero side effects on import.
+
+
+def _install_database_stub() -> object:
+    """Pre-populate sys.modules['database'] with a stub exposing a
+    `db = StubDB()` so `from database import db` resolves to our fake.
+
+    Returns the stub `db` object so tests can configure it.
+    """
+    import types
+    from unittest.mock import MagicMock
+
+    stub_db = MagicMock(name="stub_db")
+    # Default behaviors — tests override per-fixture
+    stub_db.get_setting_value.return_value = "true"
+    stub_db.get_agent_subscription_id.return_value = "sub-a"
+    stub_db.record_rate_limit_event.return_value = 1
+    stub_db.get_subscription.return_value = MagicMock(name="current_sub", name_attr="sub-a")
+    # `get_subscription` returns an object with `.name`; MagicMock attribute
+    # access returns a Mock — we want a real string for clean assertion.
+    type(stub_db.get_subscription.return_value).name = "sub-a"
+    stub_db.assign_subscription_to_agent.return_value = None
+    stub_db.create_notification.return_value = None
+
+    db_module = types.ModuleType("database")
+    db_module.db = stub_db
+    sys.modules["database"] = db_module
+
+    # Minimal db_models stub — handle_subscription_failure → _perform_auto_switch
+    # imports NotificationCreate. Provide a tolerant pass-through.
+    if "db_models" not in sys.modules:
+        models_module = types.ModuleType("db_models")
+
+        class _NotificationCreate:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        models_module.NotificationCreate = _NotificationCreate
+        sys.modules["db_models"] = models_module
+
+    return stub_db
+
+
+class TestIsAuthFailure:
+    """`is_auth_failure` correctly classifies common subscription error
+    strings. Pure-function test — no db, no fixtures."""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self):
+        _install_database_stub()
+
+    def test_known_indicators_match(self):
+        # Force re-import so the database stub is in place
+        sys.modules.pop("services.subscription_auto_switch", None)
+        from services.subscription_auto_switch import is_auth_failure
+
+        positives = [
+            "Your credit balance is too low to make this request",
+            "401 Unauthorized",
+            "HTTP 403 Forbidden",
+            "OAuth token expired",
+            "Authentication required",
+            "Not authenticated",
+            "Invalid credentials",
+        ]
+        for msg in positives:
+            assert is_auth_failure(msg) is True, f"expected match for: {msg!r}"
+
+    def test_unrelated_messages_do_not_match(self):
+        sys.modules.pop("services.subscription_auto_switch", None)
+        from services.subscription_auto_switch import is_auth_failure
+
+        negatives = [
+            "Connection reset by peer",
+            "Internal Server Error",
+            "Timeout while reading response",
+            "Rate limit reached: please retry",
+            "",
+            None,
+        ]
+        for msg in negatives:
+            assert is_auth_failure(msg) is False, f"unexpected match for: {msg!r}"
+
+
+class TestSingleEventThreshold:
+    """#441 — auto-switch must fire on the FIRST subscription failure (no 2× gate)
+    and must trigger on auth-class failures, not just 429s.
+
+    `_perform_auto_switch` is stubbed to avoid Docker / activity-service /
+    notifications. The behaviors under test (threshold, classifier dispatch,
+    alternative-selection skip-list) all happen before that call.
+    """
+
+    @pytest.fixture
+    def svc(self, monkeypatch):
+        """Yield the auto-switch service module with `database.db` stubbed
+        and `_perform_auto_switch` replaced with a recording spy."""
+        import importlib
+        from unittest.mock import MagicMock
+
+        stub_db = _install_database_stub()
+
+        # Ensure a fresh import so the new database stub is picked up
+        sys.modules.pop("services.subscription_auto_switch", None)
+        import services.subscription_auto_switch as auto_switch
+        importlib.reload(auto_switch)
+
+        # Default alternative subscription returned by select_best_alternative_subscription
+        alt = MagicMock()
+        alt.id = "sub-b"
+        alt.name = "sub-b"
+        stub_db.select_best_alternative_subscription.return_value = alt
+
+        # Stub the heavy sub-call. Record args, return a synthetic switch result.
+        calls = []
+
+        async def _spy(**kwargs):
+            calls.append(kwargs)
+            return {
+                "switched": True,
+                "agent_name": kwargs["agent_name"],
+                "old_subscription": kwargs["old_subscription_name"],
+                "new_subscription": kwargs["new_subscription"].name,
+                "failure_kind": kwargs["failure_kind"],
+                "event_count": kwargs["event_count"],
+                "restart_result": "stub",
+            }
+
+        monkeypatch.setattr(auto_switch, "_perform_auto_switch", _spy)
+        auto_switch._spy_calls = calls  # exposed for assertions
+        auto_switch._stub_db = stub_db  # exposed for per-test reconfigure
+        return auto_switch
+
+    @pytest.mark.asyncio
+    async def test_first_429_triggers_switch(self, svc):
+        """A single 429 on a subscription-backed agent triggers auto-switch
+        when an alternative is viable. Pre-#441 this required 2 events."""
+        result = await svc.handle_subscription_failure(
+            agent_name="agent-x",
+            error_message="429 Too Many Requests",
+            failure_kind="rate_limit",
+        )
+        assert result is not None
+        assert result["switched"] is True
+        assert result["new_subscription"] == "sub-b"
+        assert result["failure_kind"] == "rate_limit"
+        assert len(svc._spy_calls) == 1
+        assert svc._spy_calls[0]["event_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_first_auth_error_triggers_switch(self, svc):
+        """A single auth-class failure also triggers auto-switch — the
+        important #441 broadening."""
+        result = await svc.handle_subscription_failure(
+            agent_name="agent-x",
+            error_message="Your credit balance is too low",
+            failure_kind="auth",
+        )
+        assert result is not None
+        assert result["switched"] is True
+        assert result["failure_kind"] == "auth"
+        assert len(svc._spy_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_handle_rate_limit_error_shim_still_works(self, svc):
+        """Backward-compat shim: existing 429 callers keep working without
+        migration."""
+        result = await svc.handle_rate_limit_error(
+            agent_name="agent-x",
+            error_message="429",
+        )
+        assert result is not None
+        assert result["failure_kind"] == "rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_no_switch_when_alternative_recently_rate_limited(self, svc):
+        """Regression on the 2h skip-list: when no alternative is viable,
+        the service must NOT call _perform_auto_switch even at threshold=1.
+        We simulate the skip-list returning None for the alternative."""
+        svc._stub_db.select_best_alternative_subscription.return_value = None
+
+        result = await svc.handle_subscription_failure(
+            agent_name="agent-x",
+            error_message="429",
+            failure_kind="rate_limit",
+        )
+        assert result is None
+        assert svc._spy_calls == []
+
+    @pytest.mark.asyncio
+    async def test_setting_disabled_blocks_switch(self, svc):
+        """Operators who explicitly opted out keep their choice — when the
+        setting is "false", short-circuit before recording any event."""
+        svc._stub_db.get_setting_value.return_value = "false"
+
+        result = await svc.handle_subscription_failure(
+            agent_name="agent-x",
+            error_message="429",
+            failure_kind="rate_limit",
+        )
+        assert result is None
+        assert svc._spy_calls == []
+        # Also verify we short-circuited before recording the event
+        svc._stub_db.record_rate_limit_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_switch_when_agent_has_no_subscription(self, svc):
+        """API-key-backed agents (no subscription assigned) are skipped."""
+        svc._stub_db.get_agent_subscription_id.return_value = None
+
+        result = await svc.handle_subscription_failure(
+            agent_name="agent-x",
+            error_message="429",
+            failure_kind="rate_limit",
+        )
+        assert result is None
+        assert svc._spy_calls == []

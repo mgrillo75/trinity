@@ -377,7 +377,10 @@ async def get_auto_switch_setting(
 ):
     """Get the auto-switch subscriptions setting."""
     require_admin(current_user)
-    enabled = db.get_setting_value("auto_switch_subscriptions", default="false") == "true"
+    # #441: default flipped to "true" (opt-out). Must match the default in
+    # services/subscription_auto_switch.handle_subscription_failure so the UI
+    # toggle and the runtime gate read the same value on a clean install.
+    enabled = db.get_setting_value("auto_switch_subscriptions", default="true") == "true"
     return {"enabled": enabled}
 
 

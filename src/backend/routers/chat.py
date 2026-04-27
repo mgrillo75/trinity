@@ -462,13 +462,19 @@ async def chat_with_agent(
                 error=error_msg
             )
 
-        # SUB-003: Auto-switch subscription on rate-limit errors from agent
+        # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
+        # failures (503 from agent server, or auth indicators in the error).
+        from services.subscription_auto_switch import (
+            handle_subscription_failure,
+            is_auth_failure,
+        )
+
         if agent_status_code == 429:
             try:
-                from services.subscription_auto_switch import handle_rate_limit_error
-                switch_result = await handle_rate_limit_error(
+                switch_result = await handle_subscription_failure(
                     agent_name=name,
                     error_message=error_msg,
+                    failure_kind="rate_limit",
                 )
                 if switch_result:
                     # Auto-switch happened — inform the caller
@@ -491,6 +497,33 @@ async def chat_with_agent(
 
             # Preserve 429 from agent so frontend can show clear message
             raise HTTPException(status_code=429, detail=error_msg)
+
+        if agent_status_code == 503 or is_auth_failure(error_msg):
+            try:
+                switch_result = await handle_subscription_failure(
+                    agent_name=name,
+                    error_message=error_msg,
+                    failure_kind="auth",
+                )
+                if switch_result:
+                    # Auto-switch happened — surface as 503 + retry hint so the
+                    # frontend gets the same retry UX as the 429 path.
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error": error_msg,
+                            "auto_switch": switch_result,
+                            "message": (
+                                f"Authentication failure on subscription. Auto-switched to "
+                                f"'{switch_result['new_subscription']}'. Please retry."
+                            ),
+                            "retry_after": 15,
+                        }
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"[SUB-003] Auto-switch check failed for '{name}': {e}")
 
         raise HTTPException(
             status_code=503,

@@ -538,14 +538,30 @@ class TaskExecutionService:
                         error_msg = e.response.text[:500]
             logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
 
-            # SUB-003: Auto-switch subscription on rate-limit errors
+            # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
+            # failures (503 from agent server, or auth indicators in the error
+            # text). Fire-and-forget under broad exception handling so a switch
+            # error never masks the underlying execution failure.
             agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-            if agent_status_code == 429:
-                try:
-                    from services.subscription_auto_switch import handle_rate_limit_error
-                    await handle_rate_limit_error(agent_name=agent_name, error_message=error_msg)
-                except Exception as switch_err:
-                    logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
+            try:
+                from services.subscription_auto_switch import (
+                    handle_subscription_failure,
+                    is_auth_failure,
+                )
+                if agent_status_code == 429:
+                    await handle_subscription_failure(
+                        agent_name=agent_name,
+                        error_message=error_msg,
+                        failure_kind="rate_limit",
+                    )
+                elif agent_status_code == 503 or is_auth_failure(error_msg):
+                    await handle_subscription_failure(
+                        agent_name=agent_name,
+                        error_message=error_msg,
+                        failure_kind="auth",
+                    )
+            except Exception as switch_err:
+                logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
 
             # Issue #285: Detect auth failures (HTTP 503 from agent server)
             # Return structured error code so callers can handle appropriately
