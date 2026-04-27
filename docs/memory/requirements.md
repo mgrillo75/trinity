@@ -388,10 +388,10 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Flow**: `docs/memory/feature-flows/parallel-capacity.md` (updated), `docs/memory/feature-flows/task-execution-service.md` (updated)
 
 ### 10.8 Persistent Task Backlog (BACKLOG-001)
-- **Status**: ✅ Implemented (2026-04-13)
+- **Status**: ✅ Implemented (2026-04-13); internalized behind `CapacityManager` (#428, 2026-04-26)
 - **Requirement ID**: BACKLOG-001
-- **GitHub Issue**: #260
-- **Description**: Async `/task` requests that arrive at full parallel capacity now spill into a durable SQLite-backed FIFO backlog instead of returning HTTP 429. Queued items drain automatically when slots free via a `SlotService` release callback; 60s maintenance task expires stale rows and drains orphans after restart.
+- **GitHub Issue**: #260, internalized by #428
+- **Description**: Async `/task` requests that arrive at full parallel capacity spill into a durable SQLite-backed FIFO backlog instead of returning HTTP 429. Reached via the unified `CapacityManager.acquire(..., overflow_policy="queue_persistent", overflow_payload=...)` facade; queued items drain automatically when slots free via the manager's release-callback wiring; 60s `CapacityManager.run_maintenance()` tick expires stale rows and drains orphans after restart.
 - **Key Features**:
   - New `QUEUED` value on `TaskExecutionStatus`; reuses `schedule_executions` with `queued_at` + `backlog_metadata` columns
   - Partial index `idx_executions_queued` for cheap O(log n) FIFO claim via atomic `UPDATE ... RETURNING`

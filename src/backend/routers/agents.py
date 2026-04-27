@@ -288,15 +288,15 @@ async def get_all_agent_slots(
     - timestamp: ISO timestamp of response
     """
     from db_models import BulkSlotState
-    from services.slot_service import get_slot_service
+    from services.capacity_manager import get_capacity_manager
     from datetime import datetime
 
     # Get all agents with their capacities
     agent_capacities = db.get_all_agents_parallel_capacity()
 
-    # Get slot states from Redis
-    slot_service = get_slot_service()
-    slot_states = await slot_service.get_all_slot_states(agent_capacities)
+    # CAPACITY-CONSOLIDATE (#428): bulk capacity meter via CapacityManager.
+    capacity = get_capacity_manager()
+    slot_states = await capacity.get_all_states(agent_capacities)
 
     return BulkSlotState(
         agents=slot_states,
@@ -441,9 +441,11 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 
     # BACKLOG-001: Cancel any queued backlog items before deleting the agent
     # so they don't sit around in schedule_executions pointing at a dead agent.
+    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.cancel_all_overflow
+    # covers both in-memory queue and persistent backlog.
     try:
-        from services.backlog_service import get_backlog_service
-        await get_backlog_service().cancel_all_backlog(
+        from services.capacity_manager import get_capacity_manager
+        await get_capacity_manager().cancel_all_overflow(
             agent_name, reason="agent_deleted"
         )
     except Exception as e:

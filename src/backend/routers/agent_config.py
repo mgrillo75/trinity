@@ -363,7 +363,7 @@ async def get_agent_capacity(
     - slots: List of active slot details
     """
     from db_models import AgentCapacity, SlotInfo
-    from services.slot_service import get_slot_service
+    from services.capacity_manager import get_capacity_manager
 
     # Check access
     if not db.can_user_access_agent(current_user.username, agent_name):
@@ -376,9 +376,9 @@ async def get_agent_capacity(
     # Get max_parallel_tasks from database
     max_tasks = db.get_max_parallel_tasks(agent_name)
 
-    # Get slot state from Redis
-    slot_service = get_slot_service()
-    slot_state = await slot_service.get_slot_state(agent_name, max_tasks)
+    # CAPACITY-CONSOLIDATE (#428): per-agent slot state via CapacityManager.
+    capacity = get_capacity_manager()
+    slot_state = await capacity.get_slot_state(agent_name, max_tasks)
 
     # Convert to response model
     slots = [

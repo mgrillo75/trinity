@@ -1,5 +1,7 @@
 # Feature: Execution Termination
 
+> **Updated 2026-04-26 (#428):** Backend-side capacity cleanup after a successful terminate now calls [`CapacityManager.force_release(agent_name)`](capacity-management.md), which clears both the slot counter and the in-memory queue in one call. Replaces the prior two-step `execution_queue.force_release` + `slot_service.release_slot`.
+
 ## Overview
 
 Execution Termination allows users to stop running Claude Code executions mid-flight by sending graceful signals (SIGINT) to the subprocess, with fallback to force kill (SIGKILL) if needed. This feature enables users to cancel long-running or stuck tasks without waiting for them to complete.

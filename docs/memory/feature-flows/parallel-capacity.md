@@ -1,9 +1,11 @@
 # Feature Flow: Parallel Execution Capacity
 
+> **⚠️ INTERNAL AS OF 2026-04-26 (#428):** `SlotService` is no longer a public capacity API. It is now a private internal of [`CapacityManager`](capacity-management.md), which is the single facade callers should use. The Redis ZSET (`agent:slots:{name}`), per-agent dynamic TTL, and atomic ZADD-with-count semantics described below are unchanged — they are the implementation backing `CapacityManager.acquire/release/reclaim_stale`. New callers should reach for [`capacity-management.md`](capacity-management.md) instead of importing `SlotService` directly.
+>
 > **Requirement**: CAPACITY-001 - Per-Agent Parallel Execution Capacity
 > **Status**: Implemented (Phase 1: Backend, Phase 2: Frontend UI)
 > **Created**: 2026-02-28
-> **Updated**: 2026-03-04
+> **Updated**: 2026-04-26 (#428: SlotService internalized behind CapacityManager)
 > **Priority**: P1
 
 ## Revision History

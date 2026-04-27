@@ -29,7 +29,7 @@ import httpx
 from database import db
 from models import ActivityState, ActivityType, TaskExecutionStatus
 from services.activity_service import activity_service
-from services.slot_service import get_slot_service
+from services.capacity_manager import CapacityFull, get_capacity_manager
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -266,7 +266,7 @@ class TaskExecutionService:
             callers are responsible for translating ``result.status == "failed"``
             into the appropriate HTTP response.
         """
-        slot_service = get_slot_service()
+        capacity = get_capacity_manager()
         activity_id: Optional[str] = None
         # If caller already acquired the slot (async /task path preserves 429-upfront
         # contract by pre-flighting capacity), we still own releasing it in finally.
@@ -307,18 +307,29 @@ class TaskExecutionService:
         # stuck in 'running' status with NULL session_id and duration_ms.
         try:
             # ---- 2. Acquire capacity slot ------------------------------------
+            # CAPACITY-CONSOLIDATE (#428): policy=reject preserves prior
+            # behaviour — TaskExecutionService is invoked when the caller
+            # already decided this execution is admitted (router pre-acquires)
+            # OR is invoked from internal contexts where overflow isn't wanted
+            # (scheduler, fan-out). In both cases we want a hard rejection on
+            # capacity, not a backlog spill.
             if not slot_already_held:
                 max_parallel_tasks = db.get_max_parallel_tasks(agent_name)
-                slot_acquired = await slot_service.acquire_slot(
-                    agent_name=agent_name,
-                    execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-                    max_parallel_tasks=max_parallel_tasks,
-                    message_preview=message[:100] if message else "",
-                    timeout_seconds=timeout_seconds,  # TIMEOUT-001: Pass for dynamic slot TTL
-                )
-
-                if not slot_acquired:
-                    error_msg = f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running)"
+                try:
+                    cap_result = await capacity.acquire(
+                        agent_name=agent_name,
+                        execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+                        max_concurrent=max_parallel_tasks,
+                        message_preview=message[:100] if message else "",
+                        timeout_seconds=timeout_seconds,
+                        overflow_policy="reject",
+                    )
+                    slot_acquired = cap_result.state == "admitted"
+                except CapacityFull:
+                    error_msg = (
+                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} "
+                        f"parallel tasks running)"
+                    )
                     if execution_id:
                         db.update_execution_status(
                             execution_id=execution_id,
@@ -592,7 +603,7 @@ class TaskExecutionService:
         finally:
             # ---- 8. Release slot (only if acquired) ----------------------
             if slot_acquired:
-                await slot_service.release_slot(
+                await capacity.release(
                     agent_name,
                     execution_id or f"temp-{datetime.utcnow().timestamp()}",
                 )

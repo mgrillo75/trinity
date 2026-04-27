@@ -393,32 +393,31 @@ async def lifespan(app: FastAPI):
             print(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
-    # BACKLOG-001: Register backlog drain as a slot-release callback and spawn
-    # a 60s maintenance task. The maintenance loop handles two things:
+    # BACKLOG-001 / CAPACITY-CONSOLIDATE (#428): instantiate the unified
+    # CapacityManager (this also wires the slot-release → backlog-drain
+    # callback internally) and spawn the 60s maintenance loop. The
+    # maintenance loop handles two things:
     #   1. Expire queued rows older than 24h (-> FAILED)
     #   2. Drain orphans — queued work that missed its release callback
     #      (e.g. backend restarted between enqueue and drain).
     try:
-        from services.slot_service import get_slot_service
-        from services.backlog_service import get_backlog_service
-        _backlog = get_backlog_service()
-        get_slot_service().register_on_release(_backlog.on_slot_released)
+        from services.capacity_manager import get_capacity_manager
+        capacity = get_capacity_manager()
 
-        async def _backlog_maintenance_loop():
+        async def _capacity_maintenance_loop():
             # First tick after a short delay so startup stays snappy.
             await asyncio.sleep(15)
             while True:
                 try:
-                    await _backlog.expire_stale(max_age_hours=24)
-                    await _backlog.drain_orphans_all()
+                    await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
-                    logger.warning(f"[Backlog] maintenance tick failed: {exc}")
+                    logger.warning(f"[Capacity] maintenance tick failed: {exc}")
                 await asyncio.sleep(60)
 
-        asyncio.create_task(_backlog_maintenance_loop())
-        print("Backlog service wired (callback + 60s maintenance)")
+        asyncio.create_task(_capacity_maintenance_loop())
+        print("CapacityManager initialised; maintenance loop running (60s)")
     except Exception as e:
-        print(f"Error wiring backlog service: {e}")
+        print(f"Error wiring CapacityManager: {e}")
 
     # Recover orphaned regular task executions (Issue #128)
     try:

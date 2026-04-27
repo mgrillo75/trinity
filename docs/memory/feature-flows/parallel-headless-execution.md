@@ -3,7 +3,7 @@
 > **Requirement**: 12.1 - Parallel Headless Execution
 > **Status**: Implemented
 > **Created**: 2025-12-22
-> **Updated**: 2026-04-26 (Issue #520 empty-result detection)
+> **Updated**: 2026-04-26 (#428: `/task` async + sync paths now go through [`CapacityManager`](capacity-management.md) with `overflow_policy="queue_persistent"`; #520 empty-result detection)
 > **Verified**: 2026-02-05
 
 ## Revision History

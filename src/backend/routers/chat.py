@@ -16,8 +16,11 @@ from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskReq
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
-from services.execution_queue import get_execution_queue, QueueFullError, AgentBusyError
-from services.slot_service import get_slot_service
+from services.capacity_manager import (
+    CapacityFull,
+    PersistentTaskPayload,
+    get_capacity_manager,
+)
 from services.task_execution_service import (
     get_task_execution_service,
     agent_post_with_retry,
@@ -108,20 +111,37 @@ async def chat_with_agent(
     else:
         source = ExecutionSource.USER
 
-    # Create execution request and submit to queue
-    queue = get_execution_queue()
-    execution = queue.create_execution(
-        agent_name=name,
-        message=request.message,
-        source=source,
-        source_agent=x_source_agent,
-        source_user_id=str(current_user.id),
-        source_user_email=current_user.email or current_user.username
-    )
-
+    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.acquire call replaces
+    # the prior ExecutionQueue.submit + SlotService.acquire_slot pair. /chat
+    # shares the agent's parallel pool with /task (same `max_parallel_tasks`)
+    # and spills to an in-memory queue (depth 3, preserved from the original
+    # ExecutionQueue MAX_QUEUE_SIZE) when the pool is full. The agent's Claude
+    # subprocess is the actual serial bottleneck downstream.
+    import uuid as _uuid
+    capacity = get_capacity_manager()
+    chat_execution_id = str(_uuid.uuid4())
+    chat_timeout = db.get_execution_timeout(name)
+    max_parallel_tasks = db.get_max_parallel_tasks(name)
     try:
-        queue_result, execution = await queue.submit(execution, wait_if_busy=True)
-        logger.info(f"[Chat] Agent '{name}' execution {execution.id}: {queue_result}")
+        capacity_result = await capacity.acquire(
+            agent_name=name,
+            execution_id=chat_execution_id,
+            max_concurrent=max_parallel_tasks,
+            message_preview=request.message[:100] if request.message else "",
+            timeout_seconds=chat_timeout,
+            overflow_policy="queue_in_memory",
+            source=source,
+            source_agent=x_source_agent,
+            source_user_id=str(current_user.id),
+            source_user_email=current_user.email or current_user.username,
+            message=request.message,
+        )
+        queue_result = (
+            "running"
+            if capacity_result.state == "admitted"
+            else f"queued:{capacity_result.queue_position}"
+        )
+        logger.info(f"[Chat] Agent '{name}' execution {chat_execution_id}: {queue_result}")
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="chat_started",
@@ -136,47 +156,34 @@ async def chat_with_agent(
             endpoint=f"/api/agents/{name}/chat",
             request_id=None,
             details={
-                "execution_id": execution.id,
+                "execution_id": chat_execution_id,
                 "queue_result": queue_result,
                 "source": source.value if hasattr(source, "value") else str(source),
                 "message_length": len(request.message) if request.message else 0,
             },
         )
-    except QueueFullError as e:
-        logger.warning(f"[Chat] Agent '{name}' queue full, rejecting request")
+    except CapacityFull as e:
+        logger.warning(f"[Chat] Agent '{name}' at capacity, rejecting request (reason={e.reason})")
         raise HTTPException(
             status_code=429,
             detail={
                 "error": "Agent queue is full",
                 "agent": name,
-                "queue_length": e.queue_length,
+                "queue_length": e.depth or 0,
                 "retry_after": 30,
-                "message": f"Agent '{name}' is busy with {e.queue_length} queued requests. Please try again later."
+                "message": f"Agent '{name}' is busy. Please try again later."
             }
         )
 
     # Track queue position for observability
-    is_queued = queue_result.startswith("queued:")
-
-    # Issue #98: Acquire a capacity slot so chat executions are visible in the
-    # capacity meter. The queue still enforces serial chat; the slot makes the
-    # resource usage visible to SlotService (single source of truth for load).
-    slot_service = get_slot_service()
-    chat_slot_acquired = False
-    try:
-        chat_timeout = db.get_execution_timeout(name)
-        max_parallel_tasks = db.get_max_parallel_tasks(name)
-        chat_slot_acquired = await slot_service.acquire_slot(
-            agent_name=name,
-            execution_id=execution.id,
-            max_parallel_tasks=max_parallel_tasks,
-            message_preview=request.message[:100] if request.message else "",
-            timeout_seconds=chat_timeout,
-        )
-        if not chat_slot_acquired:
-            logger.warning(f"[Chat] Agent '{name}' at capacity, could not acquire slot for chat {execution.id}")
-    except Exception as e:
-        logger.warning(f"[Chat] Failed to acquire slot for chat execution {execution.id}: {e}")
+    is_queued = capacity_result.state == "queued_in_memory"
+    # Backwards-compat names: existing code below references `execution.id`.
+    # Map the new chat_execution_id onto the old shape so the rest of the
+    # function stays diff-minimal.
+    class _ExecutionLite:
+        def __init__(self, eid: str):
+            self.id = eid
+    execution = _ExecutionLite(chat_execution_id)
 
     # Create execution record for ALL chat calls (user, MCP, and agent-to-agent)
     # This ensures every execution appears in the Tasks tab for unified tracking (#96)
@@ -490,11 +497,9 @@ async def chat_with_agent(
             detail=f"Failed to communicate with agent: {error_msg}"
         )
     finally:
-        # Always release the queue slot when done
-        await queue.complete(name, success=execution_success)
-        # Issue #98: Release the capacity slot acquired for this chat execution
-        if chat_slot_acquired:
-            await slot_service.release_slot(name, execution.id)
+        # CAPACITY-CONSOLIDATE (#428): single release covers both the
+        # SlotService N-ary counter and the in-memory overflow bookkeeping.
+        await capacity.release(name, execution.id)
 
 
 async def _persist_chat_session(
@@ -903,66 +908,53 @@ async def execute_parallel_task(
                 }
             )
 
-    # Async mode: pre-acquire slot synchronously so at-capacity returns 429 upfront
-    # (preserves existing client contract), then delegate the lifecycle to
-    # TaskExecutionService via _run_async_task_with_persistence (issue #95).
+    # Async mode: pre-acquire capacity synchronously so at-capacity returns 429
+    # upfront (preserves existing client contract), then delegate the lifecycle
+    # to TaskExecutionService via _run_async_task_with_persistence (#95).
+    # CAPACITY-CONSOLIDATE (#428): one CapacityManager.acquire call replaces
+    # the prior slot_service.acquire_slot + backlog.enqueue dance.
     if request.async_mode:
-        slot_service = get_slot_service()
+        capacity = get_capacity_manager()
         max_parallel_tasks = db.get_max_parallel_tasks(name)
         effective_timeout = request.timeout_seconds
         if effective_timeout is None:
             effective_timeout = db.get_execution_timeout(name)
-        slot_acquired = await slot_service.acquire_slot(
-            agent_name=name,
-            execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-            max_parallel_tasks=max_parallel_tasks,
-            message_preview=request.message[:100] if request.message else "",
-            timeout_seconds=effective_timeout,
-        )
-        if not slot_acquired:
-            # BACKLOG-001: Spill to persistent backlog instead of returning 429.
-            # True 429 only if the backlog is also at its configured depth.
-            from services.backlog_service import get_backlog_service
-            backlog = get_backlog_service()
-            enqueued = await backlog.enqueue(
-                agent_name=name,
-                execution_id=execution_id,
-                request=request,
-                effective_timeout=effective_timeout,
-                user_id=current_user.id,
-                user_email=current_user.email or current_user.username,
-                subscription_id=_task_subscription_id,
-                x_source_agent=x_source_agent,
-                x_mcp_key_id=x_mcp_key_id,
-                x_mcp_key_name=x_mcp_key_name,
-                triggered_by=triggered_by,
-                collaboration_activity_id=collaboration_activity_id,
-                # #496: thread self-task fields so SELF-EXEC-001 (#264)
-                # inject_result still works when a self-task overflows to backlog.
-                is_self_task=is_self_task,
-                self_task_activity_id=self_task_activity_id,
-            )
-            if enqueued:
-                logger.info(
-                    f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
-                )
-                return {
-                    "status": "queued",
-                    "execution_id": execution_id,
-                    "agent_name": name,
-                    "message": (
-                        f"Agent at capacity; task queued. Poll GET "
-                        f"/api/agents/{name}/executions/{execution_id} for results."
-                    ),
-                    "async_mode": True,
-                }
 
-            # Backlog also full: surface true 429.
+        try:
+            cap_result = await capacity.acquire(
+                agent_name=name,
+                execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+                max_concurrent=max_parallel_tasks,
+                message_preview=request.message[:100] if request.message else "",
+                timeout_seconds=effective_timeout,
+                overflow_policy="queue_persistent",
+                overflow_payload=PersistentTaskPayload(
+                    request=request,
+                    effective_timeout=effective_timeout,
+                    user_id=current_user.id,
+                    user_email=current_user.email or current_user.username,
+                    subscription_id=_task_subscription_id,
+                    x_source_agent=x_source_agent,
+                    x_mcp_key_id=x_mcp_key_id,
+                    x_mcp_key_name=x_mcp_key_name,
+                    triggered_by=triggered_by,
+                    collaboration_activity_id=collaboration_activity_id,
+                    # #496: thread self-task fields so SELF-EXEC-001 (#264)
+                    # inject_result still works when a self-task overflows.
+                    is_self_task=is_self_task,
+                    self_task_activity_id=self_task_activity_id,
+                ),
+            )
+        except CapacityFull as e:
+            # Both capacity AND backlog are full — surface 429 with prior shape.
             if execution_id:
                 db.update_execution_status(
                     execution_id=execution_id,
                     status=TaskExecutionStatus.FAILED,
-                    error=f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running) and backlog is full"
+                    error=(
+                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running) "
+                        f"and backlog is full"
+                    ),
                 )
             raise HTTPException(
                 status_code=429,
@@ -970,7 +962,23 @@ async def execute_parallel_task(
                     f"Agent '{name}' is at capacity ({max_parallel_tasks} parallel tasks) "
                     f"and its backlog is full. Try again later."
                 ),
+            ) from e
+
+        if cap_result.state == "queued_persistent":
+            logger.info(
+                f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
             )
+            return {
+                "status": "queued",
+                "execution_id": execution_id,
+                "agent_name": name,
+                "message": (
+                    f"Agent at capacity; task queued. Poll GET "
+                    f"/api/agents/{name}/executions/{execution_id} for results."
+                ),
+                "async_mode": True,
+            }
+        slot_acquired = True  # admitted — preserved for downstream finally semantics
 
         # Issue #279: done callback surfaces unhandled BG task exceptions.
         def _on_task_done(task: asyncio.Task):
@@ -1004,63 +1012,66 @@ async def execute_parallel_task(
             "async_mode": True,
         }
 
-    # ---- Sync mode: pre-acquire slot to mirror async branch (issue #498).
+    # ---- Sync mode: pre-acquire capacity to mirror async branch (issue #498).
     # On success, delegate to TaskExecutionService with slot_already_held=True
     # so service finally still releases. On at-capacity, spill to the same
     # backlog the async path uses and long-poll on this connection until the
     # execution reaches a terminal status.
-    sync_slot_service = get_slot_service()
+    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.acquire call.
+    capacity = get_capacity_manager()
     sync_max_parallel_tasks = db.get_max_parallel_tasks(name)
     sync_effective_timeout = request.timeout_seconds
     if sync_effective_timeout is None:
         sync_effective_timeout = db.get_execution_timeout(name)
 
-    sync_slot_acquired = await sync_slot_service.acquire_slot(
-        agent_name=name,
-        execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-        max_parallel_tasks=sync_max_parallel_tasks,
-        message_preview=request.message[:100] if request.message else "",
-        timeout_seconds=sync_effective_timeout,
-    )
-
-    if not sync_slot_acquired:
-        # Issue #498: spill sync calls to the SAME backlog the async path uses
-        # (BACKLOG-001), then await on the open HTTP connection. The drain
-        # callback fires _run_async_task_with_persistence; that helper signals
-        # _sync_waiters from its finally so we wake immediately on terminal.
-        from services.backlog_service import get_backlog_service
-        sync_backlog = get_backlog_service()
-        sync_enqueued = await sync_backlog.enqueue(
+    try:
+        sync_cap_result = await capacity.acquire(
             agent_name=name,
-            execution_id=execution_id,
-            request=request,
-            effective_timeout=sync_effective_timeout,
-            user_id=current_user.id,
-            user_email=current_user.email or current_user.username,
-            subscription_id=_task_subscription_id,
-            x_source_agent=x_source_agent,
-            x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name,
-            triggered_by=triggered_by,
-            collaboration_activity_id=collaboration_activity_id,
-            is_self_task=is_self_task,
-            self_task_activity_id=self_task_activity_id,
+            execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+            max_concurrent=sync_max_parallel_tasks,
+            message_preview=request.message[:100] if request.message else "",
+            timeout_seconds=sync_effective_timeout,
+            overflow_policy="queue_persistent",
+            overflow_payload=PersistentTaskPayload(
+                request=request,
+                effective_timeout=sync_effective_timeout,
+                user_id=current_user.id,
+                user_email=current_user.email or current_user.username,
+                subscription_id=_task_subscription_id,
+                x_source_agent=x_source_agent,
+                x_mcp_key_id=x_mcp_key_id,
+                x_mcp_key_name=x_mcp_key_name,
+                triggered_by=triggered_by,
+                collaboration_activity_id=collaboration_activity_id,
+                is_self_task=is_self_task,
+                self_task_activity_id=self_task_activity_id,
+            ),
         )
-        if not sync_enqueued:
-            # Backlog ALSO full → preserve existing terminal-failure semantics.
-            if execution_id:
-                db.update_execution_status(
-                    execution_id=execution_id,
-                    status=TaskExecutionStatus.FAILED,
-                    error=f"Agent at capacity ({sync_max_parallel_tasks}/{sync_max_parallel_tasks} parallel tasks running) and backlog is full",
-                )
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Agent '{name}' is at capacity ({sync_max_parallel_tasks} parallel tasks) "
-                    f"and its backlog is full. Try again later."
+    except CapacityFull as e:
+        # Both capacity AND backlog are full → preserve terminal-failure semantics.
+        if execution_id:
+            db.update_execution_status(
+                execution_id=execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error=(
+                    f"Agent at capacity ({sync_max_parallel_tasks}/{sync_max_parallel_tasks} parallel tasks running) "
+                    f"and backlog is full"
                 ),
             )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Agent '{name}' is at capacity ({sync_max_parallel_tasks} parallel tasks) "
+                f"and its backlog is full. Try again later."
+            ),
+        ) from e
+
+    sync_slot_acquired = sync_cap_result.state == "admitted"
+
+    if not sync_slot_acquired:
+        # Spilled to backlog — long-poll on the open HTTP connection. The drain
+        # callback fires _run_async_task_with_persistence; that helper signals
+        # _sync_waiters from its finally so we wake immediately on terminal.
 
         # Long-poll cap: queue wait + execution time, both bounded individually
         # by effective_timeout via slot TTL and TaskExecutionService internals.
@@ -1734,19 +1745,19 @@ async def terminate_agent_execution(
                 detail=result.get("detail", "Termination failed")
             )
 
-        # Clear queue state and release capacity slot if termination succeeded
+        # Clear capacity state if termination succeeded.
+        # CAPACITY-CONSOLIDATE (#428): single force_release covers both the
+        # SlotService N-ary counter and the in-memory overflow queue.
         if result.get("status") in ["terminated", "already_finished"]:
-            queue = get_execution_queue()
-            await queue.force_release(name)
-            logger.info(f"[Terminate] Released queue for agent '{name}' after terminating execution {execution_id}")
-
-            # Issue #98: Also release any capacity slot held by this execution
             try:
-                term_slot_service = get_slot_service()
-                await term_slot_service.release_slot(name, execution_id)
-                logger.info(f"[Terminate] Released capacity slot for agent '{name}' execution {execution_id}")
+                capacity = get_capacity_manager()
+                fr = await capacity.force_release(name)
+                logger.info(
+                    f"[Terminate] Force-released capacity for agent '{name}' "
+                    f"(was_running={fr.was_running}, slots_cleared={fr.slots_cleared})"
+                )
             except Exception as e:
-                logger.warning(f"[Terminate] Failed to release slot for {name}: {e}")
+                logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
 
             # Update database execution record if provided
             if task_execution_id:

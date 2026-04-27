@@ -1,11 +1,14 @@
 # Feature Flow: Persistent Task Backlog
 
+> **⚠️ INTERNAL AS OF 2026-04-26 (#428):** `BacklogService` is no longer a public API. It is the persistent overflow store inside [`CapacityManager`](capacity-management.md), reached via `acquire(..., overflow_policy="queue_persistent", overflow_payload=PersistentTaskPayload(...))`. The SQL columns (`schedule_executions.queued_at`, `backlog_metadata`, status `'queued'`), drain-on-release behaviour, 24h expiry, and partial index are unchanged. New callers should reach for [`capacity-management.md`](capacity-management.md) instead of importing `BacklogService` directly.
+>
 > **Requirement**: BACKLOG-001 — Persistent task backlog for over-capacity requests
 > **Status**: Implemented
 > **Created**: 2026-04-13
-> **GitHub Issue**: [#260](https://github.com/abilityai/trinity/issues/260), extended by [#498](https://github.com/abilityai/trinity/issues/498) (sync long-poll)
+> **Updated**: 2026-04-26 (#428: BacklogService internalized behind CapacityManager)
+> **GitHub Issue**: [#260](https://github.com/abilityai/trinity/issues/260), extended by [#498](https://github.com/abilityai/trinity/issues/498) (sync long-poll), internalized by [#428](https://github.com/abilityai/trinity/issues/428)
 > **Priority**: P1
-> **Related**: [parallel-capacity.md](parallel-capacity.md), [task-execution-service.md](task-execution-service.md), [parallel-headless-execution.md](parallel-headless-execution.md)
+> **Related**: [capacity-management.md](capacity-management.md), [parallel-capacity.md](parallel-capacity.md), [task-execution-service.md](task-execution-service.md), [parallel-headless-execution.md](parallel-headless-execution.md)
 
 ## Overview
 
