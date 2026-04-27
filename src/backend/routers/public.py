@@ -494,7 +494,17 @@ async def public_chat(
         identifier_type=identifier_type
     )
 
-    # Store user message
+    # Build context from prior history before storing the new user message.
+    # Must happen first — storing the user message then reading it back would
+    # include the current message in both "Previous conversation:" and
+    # "Current message:", sending it to the agent twice on every turn.
+    context_prompt = db.build_public_chat_context(
+        session_id=chat_session.id,
+        new_message=chat_request.message,
+        max_turns=10
+    )
+
+    # Store user message (after context is built so it doesn't appear twice)
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="user",
@@ -506,13 +516,6 @@ async def public_chat(
         link_id=link["id"],
         email=verified_email,
         ip_address=client_ip
-    )
-
-    # Build context-enriched prompt with conversation history
-    context_prompt = db.build_public_chat_context(
-        session_id=chat_session.id,
-        new_message=chat_request.message,
-        max_turns=10
     )
 
     # MEM-001: Fetch per-user memory for email-verified sessions and inject into system prompt

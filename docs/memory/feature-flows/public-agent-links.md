@@ -997,11 +997,12 @@ Determine session identifier:
 db.get_or_create_public_chat_session(link_id, identifier, type)
         |
         v
-db.add_public_chat_message(session_id, "user", message)
-        |
-        v
 db.build_public_chat_context(session_id, message, max_turns=10)
   -> "Previous conversation:\nUser: ...\nAssistant: ...\n\nCurrent message:\nUser: ..."
+  NOTE: context is built BEFORE the user message is stored (#539 fix).
+        |
+        v
+db.add_public_chat_message(session_id, "user", message)
         |
         v
 TaskExecutionService.execute_task(triggered_by="public")
@@ -1144,18 +1145,18 @@ class PublicChatMessage(BaseModel):
 - `build_public_chat_context()`
 - `delete_public_link_sessions()`
 
-**Chat Endpoint** (`routers/public.py:215-362`):
-1. Validate link token (line 231)
-2. Determine session identifier (lines 235-263)
+**Chat Endpoint** (`routers/public.py`):
+1. Validate link token
+2. Determine session identifier
    - Email links: validate session_token, extract email
    - Anonymous links: use provided session_id or generate new
-3. Rate limit check (lines 265-271)
-4. Check agent availability (lines 273-279)
-5. Get or create session (lines 284-288)
-6. Store user message (lines 290-295)
-7. Record usage (lines 297-302)
-8. Build context-enriched prompt (lines 304-309)
-9. **Execute via `TaskExecutionService.execute_task(triggered_by="public")`** (lines 311-322)
+3. Rate limit check
+4. Check agent availability
+5. Get or create session
+6. **Build context-enriched prompt** (#539: must happen BEFORE storing user message to avoid duplication)
+7. Store user message
+8. Record usage
+9. **Execute via `TaskExecutionService.execute_task(triggered_by="public")`**
    - Creates `schedule_executions` record
    - Acquires capacity slot (returns 429 if at capacity)
    - Tracks activity start (Dashboard timeline)
@@ -1775,6 +1776,7 @@ Summarization is triggered every 5th message per `(agent_name, user_email)` pair
 
 | Date | Changes |
 |------|---------|
+| 2026-04-27 | **fix #539 Context duplication**: `build_public_chat_context()` was called AFTER `add_public_chat_message(role="user")`, causing the current user message to appear twice in every agent prompt (once in "Previous conversation:", once in "Current message:"). Fixed by swapping the call order — context built first from prior history, user message stored after. Added 6 unit tests in `tests/unit/test_public_chat_context.py`. Updated PUB-005 data flow and backend implementation step ordering to reflect correct call order. |
 | 2026-02-19 | **CHAT-001 Shared Components Refactor**: PublicChat.vue now uses shared components from `components/chat/` (ChatMessages, ChatInput, ChatBubble, ChatLoadingIndicator). Shared with new ChatPanel.vue authenticated chat. Updated method line numbers, added Shared Chat Components section. File now 611 lines. |
 | 2026-02-18 | **Tab consolidation**: Public Links tab removed from AgentDetail.vue. PublicLinksPanel now embedded within SharingPanel.vue (lines 82-83, 92), accessible via "Sharing" tab. Updated Entry Points, Components table, Frontend Files table, and Related Flows sections. |
 | 2025-12-22 | Initial documentation |

@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-27 | #539 | fix: public chat context duplication — `build_public_chat_context()` now called before `add_public_chat_message(role="user")`, preventing current message appearing twice in every agent prompt | [public-agent-links.md](feature-flows/public-agent-links.md) |
 | 2026-04-26 | #428 | CapacityManager facade — single public surface for capacity (admit / release / overflow policy / status / reclaim) replacing ExecutionQueue + SlotService + BacklogService trio | [capacity-management.md](feature-flows/capacity-management.md) |
 | 2026-04-26 | #516, #520 | Agent error classification — `_classify_signal_exit()` (504 for SIGINT/SIGKILL/SIGTERM, was misread as 503 auth) and `_classify_empty_result()` (502 when clean exit drops the final result message, was silent 200 + watchdog reap) | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md), [task-execution-service.md](feature-flows/task-execution-service.md) |
 | 2026-04-26 | #498 | Sync `/task` long-poll on backlog — sync parallel calls at capacity now spill to BACKLOG-001 (same backlog as async) and long-poll the open HTTP connection until terminal status (cap `2 × effective_timeout`); new `services/sync_waiter.py` owns the in-process registry + event/poll-fallback wait helper | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
