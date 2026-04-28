@@ -1,9 +1,6 @@
 <div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/trinity-logo-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/trinity-logo.svg">
-    <img src="docs/assets/trinity-logo.svg" alt="Trinity" width="120">
-  </picture>
+  <img src="docs/assets/trinity-logo-white.svg#gh-dark-mode-only" alt="Trinity" width="120"/>
+  <img src="docs/assets/trinity-logo.svg#gh-light-mode-only" alt="Trinity" width="120"/>
   <h1>Trinity</h1>
   <p><strong>Autonomous agent orchestration and infrastructure</strong></p>
   <p>Deploy, orchestrate, and govern fleets of autonomous AI agents — with real-time observability, fleet-wide scheduling, agent-to-agent delegation, and complete audit trails. On your own infrastructure.</p>
