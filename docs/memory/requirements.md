@@ -284,6 +284,11 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Key Features**: Docker socket capture, VRL transforms, platform.json/agents.json output
 - **Flow**: `docs/memory/feature-flows/vector-logging.md`
 
+### 8.8 Frontend E2E Test Infrastructure
+- **Status**: ✅ Implemented (2026-04-29)
+- **Description**: Playwright-based smoke test harness for the Trinity frontend, gated on the `ui` PR label in CI (#556)
+- **Key Features**: Chromium-only smoke suite (dashboard, agents, operating room, templates), storage-state auth pattern (login once, reuse session), label-gated CI workflow (~5 min, opt-in), on-failure artifact upload (screenshots, videos, Trinity logs)
+
 ---
 
 ## 9. Agent Collaboration
