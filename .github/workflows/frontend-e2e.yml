@@ -41,7 +41,9 @@ jobs:
       - name: Start Trinity stack
         working-directory: ${{ github.workspace }}
         env:
-          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'ci-test-password' }}
+          # Fallback password meets OWASP ASVS 2.1 complexity (upper/lower/digit/special)
+          # so the backend creates the admin user without warnings.
+          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'CiTestPassword!1' }}
           ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY || 'placeholder' }}
         run: |
           # Generate the minimum .env needed to boot. Real secrets are not
@@ -62,9 +64,18 @@ jobs:
           done
           echo "backend never became healthy"; exit 1
 
+      - name: Skip first-time setup wizard
+        working-directory: ${{ github.workspace }}
+        run: |
+          # On a fresh DB the admin user is bootstrapped from ADMIN_PASSWORD,
+          # but `setup_completed` stays false (the backfill migration runs
+          # before admin creation). Without this flag the frontend redirects
+          # every route to /setup. Mark setup complete directly.
+          docker exec trinity-backend python3 -c "from database import db; db.set_setting('setup_completed', 'true'); print('setup_completed=true')"
+
       - name: Run Playwright tests
         env:
-          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'ci-test-password' }}
+          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'CiTestPassword!1' }}
           E2E_BASE_URL: http://localhost
         run: npm run test:e2e
 

@@ -4,9 +4,9 @@ test.describe('smoke', () => {
   test('dashboard renders for authenticated admin', async ({ page }) => {
     await page.goto('/')
     // Top nav has Dashboard, Agents, Templates, Health, Ops, Keys, Settings.
-    await expect(page.getByText(/^Dashboard$/i).first()).toBeVisible()
-    await expect(page.getByText(/^Agents$/i).first()).toBeVisible()
-    await expect(page.getByText(/^Settings$/i).first()).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('link', { name: 'Agents', exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible()
   })
 
   test('agents page loads', async ({ page }) => {
