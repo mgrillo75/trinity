@@ -19,12 +19,36 @@ caches the session in `e2e/.auth/admin.json` (gitignored).
 ## Useful flags
 
 ```bash
+npm run test:e2e:smoke      # only @smoke-tagged tests (CI parity)
 npm run test:e2e:headed     # run with visible browser
 npm run test:e2e:ui         # interactive Playwright UI
 npm run test:e2e:update     # update visual regression snapshots
 ```
 
 After a run, the HTML report is at `e2e/playwright-report/index.html`.
+
+## Spec tags
+
+Each test gets a tag in its name to control where it runs:
+
+| Tag | Runs in CI? | Purpose |
+|---|---|---|
+| `@smoke` | ✅ always | Cross-page health checks. Fast (~5s), zero flakiness. Must always pass. |
+| `@visual` | ❌ local only | Visual regression / screenshot baselines. Deferred until cross-platform baseline capture is sorted (issue #596). |
+| `@interactive` | ❌ local only | Forms, modals, multi-step flows. Local-only until stabilised. |
+
+CI runs `npm run test:e2e:smoke` (filters by `@smoke`). To promote a spec to CI, simply rename it to include `@smoke` — no workflow changes needed.
+
+```js
+// CI + local
+test('@smoke dashboard renders', async ({ page }) => { ... })
+
+// Local only (until visual regression infra lands — #596)
+test('@visual /monitoring summary cards', async ({ page }) => { ... })
+
+// Local only (interactive flow)
+test('@interactive create agent end-to-end', async ({ page }) => { ... })
+```
 
 ## CI
 

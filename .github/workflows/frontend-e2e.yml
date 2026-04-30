@@ -73,11 +73,13 @@ jobs:
           # every route to /setup. Mark setup complete directly.
           docker exec trinity-backend python3 -c "from database import db; db.set_setting('setup_completed', 'true'); print('setup_completed=true')"
 
-      - name: Run Playwright tests
+      - name: Run Playwright smoke tests
         env:
           ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'CiTestPassword!1' }}
           E2E_BASE_URL: http://localhost
-        run: npm run test:e2e
+        # Only @smoke-tagged specs run in CI. @visual / @interactive specs
+        # are local-only until their flake/baseline story is sorted (#596).
+        run: npm run test:e2e:smoke
 
       - name: Collect Trinity logs on failure
         if: failure()

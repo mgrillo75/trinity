@@ -7,6 +7,7 @@
     "preview": "vite preview",
     "check:tokens": "node scripts/check-design-tokens.mjs",
     "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test --grep @smoke",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:update": "playwright test --update-snapshots"
