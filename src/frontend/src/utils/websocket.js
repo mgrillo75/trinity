@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
@@ -9,12 +10,19 @@ const isConnected = ref(false)
 // so a brief disconnect replays missed events rather than dropping them.
 let lastEventId = null
 
+// #550: mint a fresh single-use ticket immediately before each connect.
+// Tickets are 30s TTL and consumed on use, so reconnects always re-fetch.
+async function fetchWsTicket() {
+  const { data } = await axios.post('/api/ws/ticket')
+  return data.ticket
+}
+
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
 
-  const connect = () => {
+  const connect = async () => {
     if (ws.value) return
 
     const token = localStorage.getItem('token')
@@ -23,7 +31,16 @@ export function useWebSocket() {
       return
     }
 
-    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    let ticket
+    try {
+      ticket = await fetchWsTicket()
+    } catch (err) {
+      console.error('WebSocket: failed to mint ticket, retrying in 5s', err)
+      setTimeout(connect, 5000)
+      return
+    }
+
+    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
     if (lastEventId) {
       wsUrl += `&last-event-id=${encodeURIComponent(lastEventId)}`
     }

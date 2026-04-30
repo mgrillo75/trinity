@@ -222,6 +222,12 @@
     <!-- Divider -->
     <div class="border-t border-gray-200 dark:border-gray-700"></div>
 
+    <!-- File Sharing Section (FILES-001) -->
+    <FileSharingPanel :agent-name="agentName" />
+
+    <!-- Divider -->
+    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+
     <!-- Public Links Section -->
     <PublicLinksPanel :agent-name="agentName" />
   </div>
@@ -238,6 +244,7 @@ import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
+import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
   agentName: {

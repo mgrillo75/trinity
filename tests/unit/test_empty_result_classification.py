@@ -145,6 +145,90 @@ def test_zero_duration_is_not_treated_as_missing():
 
 
 # ---------------------------------------------------------------------------
+# raw_messages fallback: derive tool_count / num_turns when result line lost.
+# Issue #531: metadata.tool_count and num_turns are also None when the result
+# line is lost (they're only populated by that line). Pass raw_messages so
+# the 502 detail shows honest counts.
+# ---------------------------------------------------------------------------
+
+def _make_assistant_msg(tool_use: bool) -> dict:
+    """Build a minimal raw 'assistant' message, optionally with tool_use."""
+    content = (
+        [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+        if tool_use
+        else [{"type": "text", "text": "hello"}]
+    )
+    return {"type": "assistant", "message": {"content": content}}
+
+
+def test_raw_messages_fallback_derives_num_turns():
+    """When the result line is lost, metadata.num_turns is None (it's only
+    populated from the result line). raw_messages are used to derive an
+    honest turn count for the 502 detail.
+
+    metadata.tool_count is accumulated per-message during parsing, so it
+    remains accurate even without the result line and is used directly.
+    """
+    raw = [
+        {"type": "user", "message": {"content": "go"}},
+        _make_assistant_msg(tool_use=True),   # turn 1
+        {"type": "user", "message": {"content": "result"}},
+        _make_assistant_msg(tool_use=False),  # turn 2
+        _make_assistant_msg(tool_use=True),   # turn 3
+    ]
+    # tool_count=5 (accumulated during parsing); num_turns=None (result line lost)
+    metadata = ExecutionMetadata(tool_count=5)
+
+    result = _classify_empty_result(metadata, raw_message_count=len(raw), raw_messages=raw)
+
+    assert result is not None
+    _, detail = result
+    assert "5 tool calls" in detail  # from metadata (accumulated during parsing)
+    assert "3 turns" in detail       # 3 assistant messages counted from raw_messages
+
+
+def test_raw_messages_fallback_not_used_when_num_turns_present():
+    """When metadata.num_turns is populated (result line arrived normally),
+    raw_messages counting is skipped — metadata is authoritative."""
+    raw = [
+        _make_assistant_msg(tool_use=True),
+        _make_assistant_msg(tool_use=True),
+        _make_assistant_msg(tool_use=True),  # 3 from raw
+    ]
+    metadata = ExecutionMetadata(tool_count=7, num_turns=10)  # explicit counts
+
+    result = _classify_empty_result(metadata, raw_message_count=len(raw), raw_messages=raw)
+
+    assert result is not None
+    _, detail = result
+    assert "7 tool calls" in detail   # uses metadata tool_count
+    assert "10 turns" in detail       # uses metadata num_turns (not raw count 3)
+
+
+def test_raw_messages_empty_falls_back_to_zero():
+    """No raw_messages and no metadata counts → zeros in detail, no crash."""
+    metadata = ExecutionMetadata()  # all None
+
+    result = _classify_empty_result(metadata, raw_message_count=0, raw_messages=[])
+
+    assert result is not None
+    _, detail = result
+    assert "0 tool calls" in detail
+    assert "0 turns" in detail
+
+
+def test_raw_messages_none_falls_back_to_zero():
+    """raw_messages=None (old callers) → zeros in detail, backward compat."""
+    metadata = ExecutionMetadata()
+
+    result = _classify_empty_result(metadata, raw_message_count=0, raw_messages=None)
+
+    assert result is not None
+    _, detail = result
+    assert "0 tool calls" in detail
+
+
+# ---------------------------------------------------------------------------
 # Defensive: missing metadata.
 # ---------------------------------------------------------------------------
 

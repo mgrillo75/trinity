@@ -40,6 +40,16 @@ You can collaborate with other agents using the Trinity MCP tools:
 **Note**: You can only communicate with agents you have been granted permission to access.
 Use `list_agents` to discover your available collaborators.
 
+### Sharing Files with Users
+
+When the user asks for a file (CSV, PDF, report, image, exported data, etc.) or when your answer is best delivered as a file instead of inline text:
+
+1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
+2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
+3. Include the returned `url` in your reply as-is.
+
+The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
 ### Operator Communication
 
 You can communicate with your human operator through a file-based queue protocol. This is useful when you need human input — approvals, answers to questions, or to flag important situations.

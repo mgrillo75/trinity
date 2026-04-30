@@ -137,14 +137,23 @@ def drain_reader_threads(
     process: subprocess.Popen,
     *threads: Optional[threading.Thread],
     grace: int = 5,
+    post_kill_grace: int = 30,
     pgid: Optional[int] = None,
 ) -> None:
     """Join subprocess reader threads with a bounded timeout.
 
     If any thread is still alive after ``grace`` seconds, a surviving
-    process-group member is holding a pipe write end open. Kill the
-    group (via ``pgid`` if provided, else looked up) and force-close
-    our pipe FDs so readline() returns and threads exit.
+    process-group member is holding a pipe write end open. Kill the group
+    (via ``pgid`` if provided, else looked up), then wait up to
+    ``post_kill_grace`` seconds for the reader to drain naturally before
+    force-closing pipes as a last resort.
+
+    Ordering matters: once all writers (claude + hook grandchildren) are
+    dead the kernel will EOF the read end as soon as the buffered bytes are
+    consumed. If we close our read FD first the reader raises
+    ``ValueError: I/O operation on closed file`` and the kernel buffer —
+    including the final ``{"type":"result"}`` JSON line — is discarded
+    silently. Waiting for natural drain preserves that data. (#531)
 
     Callers that have already reaped the parent via ``process.wait()``
     must pass ``pgid`` — after reaping, the pid is gone and we'd
@@ -159,21 +168,46 @@ def drain_reader_threads(
         return
 
     logger.warning(
-        "[Subprocess] Reader thread(s) stuck after process exit "
-        "(pid=%s, stuck_count=%s) — killing process group and closing pipes to unwind",
-        process.pid, len(stuck),
+        "[Subprocess] Reader thread(s) still busy after process exit "
+        "(pid=%s, stuck_count=%s) — killing process group, then waiting "
+        "%ss for natural drain",
+        process.pid, len(stuck), post_kill_grace,
     )
     terminate_process_group(process, graceful_timeout=1, pgid=pgid)
-    safe_close_pipes(process)
+
+    # Grandchildren are gone → kernel will EOF the pipe as the last write
+    # FD is reaped → reader's readline() returns '' once it drains the
+    # buffered tail (including the final result JSON line on long tasks).
     for t in stuck:
+        t.join(timeout=post_kill_grace)
+
+    still_stuck = [t for t in stuck if t.is_alive()]
+    if not still_stuck:
+        logger.info(
+            "[Subprocess] Reader thread(s) drained naturally after "
+            "grandchild termination (pid=%s)",
+            process.pid,
+        )
+        return
+
+    # Genuine wedge — reader did not return even after grandchildren died
+    # and the kernel should have EOF'd. Force-close and accept data loss.
+    logger.error(
+        "[Subprocess] Reader thread(s) still stuck after %ss post-kill "
+        "grace — force-closing pipes; some buffered data may be lost "
+        "(pid=%s, stuck_count=%s)",
+        post_kill_grace, process.pid, len(still_stuck),
+    )
+    safe_close_pipes(process)
+    for t in still_stuck:
         t.join(timeout=2)
 
-    still_alive = [t for t in stuck if t.is_alive()]
-    if still_alive:
+    leaked = [t for t in still_stuck if t.is_alive()]
+    if leaked:
         logger.error(
             "[Subprocess] %s reader thread(s) leaked for pid=%s after "
-            "close+killpg; continuing anyway",
-            len(still_alive), process.pid,
+            "force-close; continuing anyway",
+            len(leaked), process.pid,
         )
 
 

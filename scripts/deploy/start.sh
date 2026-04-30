@@ -27,6 +27,15 @@ if grep -qE '^CREDENTIAL_ENCRYPTION_KEY=$' .env 2>/dev/null || ! grep -q 'CREDEN
     echo "Auto-generated CREDENTIAL_ENCRYPTION_KEY"
 fi
 
+# Check base image before starting — without it, agent creation will silently fail
+if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "trinity-agent-base:latest"; then
+    echo "⚠️  trinity-agent-base:latest not found."
+    echo "   Building base agent image first (required for agent creation)..."
+    echo ""
+    ./scripts/deploy/build-base-image.sh
+    echo ""
+fi
+
 echo "Starting services..."
 docker compose up -d
 
@@ -56,6 +65,8 @@ echo "To view logs:"
 echo "  docker compose logs -f"
 echo ""
 echo "To stop services:"
-echo "  docker compose down"
+echo "  docker compose stop"
+echo ""
+echo "NOTE: Use 'stop' not 'down' — 'down' destroys agent containers."
 echo ""
 

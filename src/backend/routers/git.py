@@ -347,7 +347,7 @@ async def initialize_github_sync(
         else:
             # Database record exists but git not initialized - clean up orphaned record
             print(f"Warning: Found orphaned git config for {agent_name}. Cleaning up and allowing re-initialization.")
-            db.execute_query("DELETE FROM agent_git_config WHERE agent_name = ?", (agent_name,))
+            db.delete_git_config(agent_name)
 
     # Get GitHub PAT from settings
     github_pat = get_github_pat()

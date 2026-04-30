@@ -189,6 +189,8 @@ The test suite covers:
 - **File Upload** (unit/test_file_upload.py) - Telegram file extraction, download, message router validation, parse_message with files (#354 Phase 1); workspace delivery — filename sanitization (NFKC, traversal, length, collision dedup), chat injection format `[File uploaded by {uploader}]`, all-writes-failed signaling, partial failure handling (#487 Phase 2) [UNIT]
 - **Telegram Voice** (unit/test_telegram_voice.py) - Voice transcription validation (duration/size limits), formatting, placeholder constants (#318) [UNIT]
 - **Inter-Agent Timeout** (test_inter_agent_timeout_unit.py) - FanOutRequest Optional timeout, per-subtask None dispatch, conditional asyncio.timeout wrap (#418) [UNIT]
+- **Subprocess PGroup** (unit/test_subprocess_pgroup.py) - Process-group lifecycle: terminate, drain_reader_threads (natural-drain ordering #531, buffered-data preservation), safe_close_pipes, signal_process_tree (#407, #531) [UNIT]
+- **Empty Result Classification** (unit/test_empty_result_classification.py) - Clean exit with lost result line → 502, two-field null check, raw_messages num_turns fallback, populated-metadata pass-through (#520, #521, #531) [UNIT]
 
 ### Avatars & Image Generation
 - **Avatars** (test_avatars.py) - Avatar serving, generation, regeneration, deletion, emotions, identity prompts, default generation (AVATAR-001/002/003) [SMOKE + Agent]
@@ -231,9 +233,9 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,257 tests across 124 test files
+**Total Tests**: ~2,262 tests across 124 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~165 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67))
+**Unit Tests**: ~170 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67), subprocess pgroup (11), empty result classification (13))
 **Core Tests (not slow)**: ~2,112 tests
 **Slow Tests**: ~99 tests (chat execution, fleet ops, system agent ops, execution termination, WhatsApp live-backend integration)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
@@ -262,6 +264,40 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-04-27)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_subprocess_pgroup.py` | Regression test for #531 — `test_buffered_data_preserved_after_grandchild_kill` verifies that data written to stdout before a grandchild is killed (including the final result JSON line) is not dropped when `drain_reader_threads` is called | +1 test (file total 11) |
+| `unit/test_empty_result_classification.py` | Four new tests for `_classify_empty_result` raw_messages fallback (#531): `test_raw_messages_fallback_derives_num_turns`, `test_raw_messages_fallback_not_used_when_num_turns_present`, `test_raw_messages_empty_falls_back_to_zero`, `test_raw_messages_none_falls_back_to_zero` | +4 tests (file total 13) |
+
+**Pipe drain ordering fix (#531)** — `drain_reader_threads` in `subprocess_pgroup.py`:
+
+Root cause of the "Execution completed without a result message" HTTP 502 on long agentic tasks. The old code called `safe_close_pipes()` immediately after `terminate_process_group()`, discarding the kernel pipe buffer (including the `{"type":"result"}` final JSON line) before the reader thread could drain it. Fixed: kill grandchildren first, then wait up to `post_kill_grace=30s` for natural drain; force-close only as a last resort for genuine wedges.
+
+The new `test_buffered_data_preserved_after_grandchild_kill` test spawns a subprocess that writes a sentinel `RESULT_LINE` then forks a grandchild that holds stdout open; verifies the sentinel survives the grandchild kill. The `_classify_empty_result` tests verify that `num_turns` is derived from `raw_messages` when the result line was lost (since `metadata.num_turns` is only populated by that line), while `tool_count` continues to come from metadata (accumulated per-message during parsing, so accurate even without the result line).
+
+---
+
+## Recent Test Additions (2026-04-25)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_github_init_gitignore.py` | Gitignore widen + migrate-on-push (#462) — full exclusion list coverage, idempotency, doc/constant sync, `git rm --cached` for newly-ignored files | 4 new tests (file total 6) |
+
+**Gitignore Widen + Migrate (#462)** (`unit/test_github_init_gitignore.py`):
+
+- `test_preserves_preexisting_gitignore` — existing `.gitignore` content is retained after init (pre-existing test)
+- `test_fresh_agent_ignores_env_and_mcp_json` — fresh agent gets `.env` and `.mcp.json` exclusions (pre-existing test)
+- `test_full_documented_exclusion_list_present` — all patterns in `_GITIGNORE_PATTERNS` constant are written to `.gitignore` (new)
+- `test_idempotent_double_run` — running `initialize_git_in_container` twice does not duplicate patterns (new)
+- `test_doc_and_constant_in_sync` — `_GITIGNORE_PATTERNS` constant matches the exclusion block in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` (new)
+- `test_rm_cached_for_newly_ignored_files` — `sync_to_github` calls `git rm --cached` for files that are tracked but now match a `.gitignore` pattern (new)
+
+Pure unit tests over `git_service.py` stubs; no backend container required. Run via `pytest tests/unit/test_github_init_gitignore.py`.
+
+---
 
 ## Recent Test Additions (2026-04-23)
 

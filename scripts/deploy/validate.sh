@@ -10,7 +10,7 @@ echo "====================================="
 echo ""
 
 echo "1. Checking directory structure..."
-required_dirs=("docker" "src" "config" "scripts" "deployment")
+required_dirs=("docker" "src" "config" "scripts")
 for dir in "${required_dirs[@]}"; do
     if [ -d "$dir" ]; then
         echo "   ✅ $dir/"
@@ -33,11 +33,11 @@ echo ""
 echo "3. Checking required files..."
 required_files=(
     "docker-compose.yml"
-    "QUICK_START.md"
+    ".env.example"
     "src/backend/main.py"
-    "src/audit-logger/audit_logger.py"
     "docker/base-image/Dockerfile"
     "scripts/deploy/start.sh"
+    "scripts/deploy/build-base-image.sh"
 )
 
 for file in "${required_files[@]}"; do
@@ -78,8 +78,9 @@ echo ""
 echo "Platform is ready for deployment!"
 echo ""
 echo "Next steps:"
-echo "  1. Copy env.example to .env and configure"
-echo "  2. Run ./scripts/deploy/start.sh"
-echo "  3. Access web UI at http://localhost:3000"
+echo "  1. Copy .env.example to .env and configure"
+echo "  2. Run ./scripts/deploy/build-base-image.sh"
+echo "  3. Run ./scripts/deploy/start.sh"
+echo "  4. Access web UI at http://localhost"
 echo ""
 

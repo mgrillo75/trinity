@@ -102,8 +102,8 @@
             v-if="item.priority === 'critical' || item.priority === 'high'"
             class="flex-shrink-0 text-xs font-medium px-1.5 py-0.5 rounded"
             :class="{
-              'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400': item.priority === 'critical',
-              'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400': item.priority === 'high'
+              'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/30 dark:text-status-danger-400': item.priority === 'critical',
+              'bg-status-urgent-100 text-status-urgent-700 dark:bg-status-urgent-900/30 dark:text-status-urgent-400': item.priority === 'high'
             }"
           >
             {{ item.priority }}
@@ -122,10 +122,10 @@ const store = useOperatorQueueStore()
 
 function priorityColor(priority) {
   const colors = {
-    critical: 'bg-red-500 animate-pulse',
-    high: 'bg-orange-500',
-    medium: 'bg-yellow-500',
-    low: 'bg-blue-400'
+    critical: 'bg-status-danger-500 animate-pulse',
+    high: 'bg-status-urgent-500',
+    medium: 'bg-status-warning-500',
+    low: 'bg-status-info-400'
   }
   return colors[priority] || 'bg-gray-400'
 }
@@ -162,7 +162,7 @@ function typeIcon(type) {
 
 function typeIconColor(type) {
   const colors = {
-    approval: 'text-purple-500 dark:text-purple-400',
+    approval: 'text-accent-purple-500 dark:text-accent-purple-400',
     question: 'text-blue-500 dark:text-blue-400',
     alert: 'text-amber-500 dark:text-amber-400'
   }
@@ -171,9 +171,9 @@ function typeIconColor(type) {
 
 function statusBadge(status) {
   const badges = {
-    responded: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+    responded: 'bg-status-success-100 text-status-success-700 dark:bg-status-success-900/30 dark:text-status-success-400',
     acknowledged: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400',
-    expired: 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400'
+    expired: 'bg-status-danger-100 text-status-danger-600 dark:bg-status-danger-900/30 dark:text-status-danger-400'
   }
   return badges[status] || ''
 }

@@ -128,7 +128,8 @@ async def execute_task(request: ParallelTaskRequest):
         timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
         max_turns=request.max_turns,
         execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
-        resume_session_id=request.resume_session_id  # Resume previous session (EXEC-023)
+        resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
+        images=request.images,  # Vision images from channel adapters (#562)
     )
 
     logger.info(f"[Task] Task {session_id} completed successfully")
@@ -257,7 +258,10 @@ async def terminate_execution(execution_id: str):
     This allows Claude Code to finish its current operation gracefully.
     """
     registry = get_process_registry()
-    result = registry.terminate(execution_id)
+    # registry.terminate() does up to 7s of synchronous process.wait() (SIGINT grace + SIGKILL grace);
+    # run in the default executor so the event loop stays responsive to concurrent /health probes.
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, registry.terminate, execution_id)
 
     if result["success"]:
         logger.info(f"[Terminate] Execution {execution_id} terminated successfully")

@@ -45,17 +45,56 @@ class _StubChannelTransport:
         pass
 
 
-# Insert stubs before importing the module under test
-_adapters = types.ModuleType("adapters")
-_transports = types.ModuleType("adapters.transports")
+# Insert stubs before importing the module under test.
+#
+# We only need to stub `adapters.transports.base.ChannelTransport` —
+# that is the ONLY symbol slack_socket.py imports from the adapters package.
+# Unconditionally replacing `sys.modules["adapters"]` with a plain module
+# breaks other tests in the combined suite that later do
+# `from adapters.whatsapp_adapter import ...` (the package lookup then sees a
+# non-package and raises "adapters is not a package").
+#
+# Fix: install a stub *only* for `adapters.transports.base`. Leave the top-
+# level `adapters` and `adapters.transports` namespace packages alone (they
+# may already point to the real backend source via sys.path). If they are
+# not yet in sys.modules, install minimal namespace-package shims (with
+# __path__ set) so that Python can traverse the package tree correctly.
+
+_BACKEND_ADAPTERS = None
+try:
+    from pathlib import Path as _Path
+    _BACKEND_ADAPTERS = _Path(__file__).resolve().parent.parent.parent / "src" / "backend" / "adapters"
+except Exception:
+    pass
+
+# Ensure `adapters` is a proper package in sys.modules (not a plain module).
+if "adapters" not in sys.modules:
+    _adapters_pkg = types.ModuleType("adapters")
+    if _BACKEND_ADAPTERS and _BACKEND_ADAPTERS.exists():
+        _adapters_pkg.__path__ = [str(_BACKEND_ADAPTERS)]  # type: ignore[attr-defined]
+    sys.modules["adapters"] = _adapters_pkg
+elif not getattr(sys.modules["adapters"], "__path__", None):
+    # Already a plain module (not a package) — upgrade it.
+    _adapters_pkg = sys.modules["adapters"]
+    if _BACKEND_ADAPTERS and _BACKEND_ADAPTERS.exists():
+        _adapters_pkg.__path__ = [str(_BACKEND_ADAPTERS)]  # type: ignore[attr-defined]
+
+# Ensure `adapters.transports` is a proper package.
+if "adapters.transports" not in sys.modules:
+    _transports_pkg = types.ModuleType("adapters.transports")
+    if _BACKEND_ADAPTERS and (_BACKEND_ADAPTERS / "transports").exists():
+        _transports_pkg.__path__ = [str(_BACKEND_ADAPTERS / "transports")]  # type: ignore[attr-defined]
+    sys.modules["adapters.transports"] = _transports_pkg
+elif not getattr(sys.modules["adapters.transports"], "__path__", None):
+    _transports_pkg = sys.modules["adapters.transports"]
+    if _BACKEND_ADAPTERS and (_BACKEND_ADAPTERS / "transports").exists():
+        _transports_pkg.__path__ = [str(_BACKEND_ADAPTERS / "transports")]  # type: ignore[attr-defined]
+
+# Stub only `adapters.transports.base` so SlackSocketTransport can be
+# imported without instantiating the abstract ChannelTransport base class.
 _base = types.ModuleType("adapters.transports.base")
 _base.ChannelTransport = _StubChannelTransport
-
-sys.modules["adapters"] = _adapters
-sys.modules["adapters.transports"] = _transports
 sys.modules["adapters.transports.base"] = _base
-_adapters.transports = _transports
-_transports.base = _base
 
 # Import via importlib to load the .py file directly
 import importlib.util

@@ -34,13 +34,19 @@ class TestAutoSwitchSetting:
     """SUB-003: Auto-switch setting endpoint tests."""
 
     @pytest.mark.smoke
-    def test_get_auto_switch_default_off(self, api_client: TrinityApiClient):
-        """GET /api/subscriptions/settings/auto-switch defaults to disabled."""
+    def test_get_auto_switch_default_on(self, api_client: TrinityApiClient):
+        """GET /api/subscriptions/settings/auto-switch defaults to enabled (#441 — flipped to opt-out).
+
+        Note: this asserts the runtime default. The endpoint applies
+        `default="true"` only when no value is stored in `system_settings`. If
+        a prior test or the dev DB explicitly set it to "false", this test
+        will fail — clear the stored value first or run against a fresh DB.
+        """
         response = api_client.get("/api/subscriptions/settings/auto-switch")
         assert_status(response, 200)
         data = assert_json_response(response)
         assert "enabled" in data
-        assert data["enabled"] is False
+        assert data["enabled"] is True
 
     @pytest.mark.smoke
     def test_enable_auto_switch(self, api_client: TrinityApiClient):

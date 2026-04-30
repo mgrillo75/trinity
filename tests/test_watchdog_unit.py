@@ -392,9 +392,8 @@ class TestReconcileOrphanedExecutions:
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_agent_unreachable_skips(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_agent_unreachable_skips(self, mock_capacity_fn, mock_db, mock_httpx):
         """When agent is unreachable, skip its executions entirely."""
         mock_cm, mock_client = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -419,9 +418,8 @@ class TestReconcileOrphanedExecutions:
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_orphan_not_found_on_agent(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_orphan_not_found_on_agent(self, mock_capacity_fn, mock_db, mock_httpx):
         """Execution not found on agent -> orphan recovery."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -431,10 +429,8 @@ class TestReconcileOrphanedExecutions:
         ]
         mock_db.mark_execution_failed_by_watchdog.return_value = True
 
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value=set())
@@ -448,15 +444,14 @@ class TestReconcileOrphanedExecutions:
         assert terminated == 0
         assert confirmed_running == set()
         mock_db.mark_execution_failed_by_watchdog.assert_called_once()
-        mock_slot.release_slot.assert_called_once_with("agent-a", "exec-1")
-        # Atomic conditional release — no TOCTOU race
-        mock_q.force_release_if_matches.assert_called_once_with("agent-a", "exec-1")
+        # CAPACITY-CONSOLIDATE (#428): one TOCTOU-safe release call covers
+        # both the slot count and the in-memory queue bookkeeping.
+        mock_capacity.release_if_matches.assert_called_once_with("agent-a", "exec-1")
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_running_under_timeout_no_action(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_running_under_timeout_no_action(self, mock_capacity_fn, mock_db, mock_httpx):
         """Execution running on agent under timeout -> no action."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -480,9 +475,8 @@ class TestReconcileOrphanedExecutions:
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_running_over_timeout_auto_terminates(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_running_over_timeout_auto_terminates(self, mock_capacity_fn, mock_db, mock_httpx):
         """Execution running on agent over timeout -> auto-terminate."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -492,10 +486,8 @@ class TestReconcileOrphanedExecutions:
         ]
         mock_db.mark_execution_failed_by_watchdog.return_value = True
 
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value={"exec-1"})
@@ -514,9 +506,8 @@ class TestReconcileOrphanedExecutions:
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_terminate_fails_skips_recovery(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_terminate_fails_skips_recovery(self, mock_capacity_fn, mock_db, mock_httpx):
         """If terminate returns False, DB/resource cleanup is skipped."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -525,10 +516,8 @@ class TestReconcileOrphanedExecutions:
             {"id": "exec-1", "agent_name": "agent-a", "started_at": _past_iso(20), "timeout_seconds": 600, "schedule_id": "s1"},
         ]
 
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value={"exec-1"})
@@ -543,13 +532,12 @@ class TestReconcileOrphanedExecutions:
         assert terminated == 0
         assert confirmed_running == set()
         mock_db.mark_execution_failed_by_watchdog.assert_not_called()
-        mock_slot.release_slot.assert_not_called()
+        mock_capacity.release_if_matches.assert_not_called()
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_race_condition_db_update_noop(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_race_condition_db_update_noop(self, mock_capacity_fn, mock_db, mock_httpx):
         """When DB update returns False (race), skip slot/queue release."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -559,10 +547,8 @@ class TestReconcileOrphanedExecutions:
         ]
         mock_db.mark_execution_failed_by_watchdog.return_value = False
 
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value=set())
@@ -574,14 +560,12 @@ class TestReconcileOrphanedExecutions:
 
         assert orphaned == 0
         assert confirmed_running == set()
-        mock_slot.release_slot.assert_not_called()
-        mock_q.force_release_if_matches.assert_not_called()
+        mock_capacity.release_if_matches.assert_not_called()
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_per_execution_error_isolation(self, mock_queue_fn, mock_slot_fn, mock_db, mock_httpx):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_per_execution_error_isolation(self, mock_capacity_fn, mock_db, mock_httpx):
         """One execution's failure doesn't block recovery of others."""
         mock_cm, _ = self._mock_httpx_client()
         mock_httpx.return_value = mock_cm
@@ -596,10 +580,8 @@ class TestReconcileOrphanedExecutions:
             True,
         ]
 
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value=set())
@@ -775,15 +757,12 @@ class TestRecoverExecutionWithErrorContext:
         return CleanupService()
 
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_combines_original_error_with_cleanup_reason(self, mock_queue_fn, mock_slot_fn, mock_db):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_combines_original_error_with_cleanup_reason(self, mock_capacity_fn, mock_db):
         """Combines original error context with cleanup reason."""
         mock_db.mark_execution_failed_by_watchdog.return_value = True
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_execution_error = AsyncMock(return_value="[auth_failure] Token expired")
@@ -805,15 +784,12 @@ class TestRecoverExecutionWithErrorContext:
         assert "recovered by watchdog" in error_arg
 
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_uses_cleanup_reason_when_no_original_error(self, mock_queue_fn, mock_slot_fn, mock_db):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_uses_cleanup_reason_when_no_original_error(self, mock_capacity_fn, mock_db):
         """Uses cleanup reason alone when no original error is available."""
         mock_db.mark_execution_failed_by_watchdog.return_value = True
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_execution_error = AsyncMock(return_value=None)
@@ -832,15 +808,12 @@ class TestRecoverExecutionWithErrorContext:
         assert error_arg == "recovered by watchdog"
 
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_truncates_long_error_messages(self, mock_queue_fn, mock_slot_fn, mock_db):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_truncates_long_error_messages(self, mock_capacity_fn, mock_db):
         """Truncates combined error message to prevent DB bloat."""
         mock_db.mark_execution_failed_by_watchdog.return_value = True
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         # Create a very long error message
@@ -862,15 +835,12 @@ class TestRecoverExecutionWithErrorContext:
         assert error_arg.endswith("...")
 
     @patch("services.cleanup_service.db")
-    @patch("services.cleanup_service.get_slot_service")
-    @patch("services.cleanup_service.get_execution_queue")
-    def test_works_without_client(self, mock_queue_fn, mock_slot_fn, mock_db):
+    @patch("services.cleanup_service.get_capacity_manager")
+    def test_works_without_client(self, mock_capacity_fn, mock_db):
         """Works correctly when no client is provided (fallback path)."""
         mock_db.mark_execution_failed_by_watchdog.return_value = True
-        mock_slot = AsyncMock()
-        mock_slot_fn.return_value = mock_slot
-        mock_q = AsyncMock()
-        mock_queue_fn.return_value = mock_q
+        mock_capacity = AsyncMock()
+        mock_capacity_fn.return_value = mock_capacity
 
         service = self._make_service()
         service._get_execution_error = AsyncMock()

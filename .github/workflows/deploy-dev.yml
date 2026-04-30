@@ -1,0 +1,51 @@
+name: Deploy to Dev
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: Deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 100.96.144.19
+          username: trinity
+          key: ${{ secrets.DEV_SSH_KEY }}
+          command_timeout: 25m
+          script: |
+            set -e
+            cd ~/trinity
+
+            echo "=== Pull ==="
+            git fetch origin dev
+            git checkout dev
+            git pull origin dev
+            echo "Version: $(git log -1 --oneline)"
+
+            echo "=== Build ==="
+            sudo docker compose -f docker-compose.prod.yml build --no-cache backend frontend mcp-server scheduler
+
+            echo "=== Restart ==="
+            sudo docker compose -f docker-compose.prod.yml up -d backend frontend mcp-server scheduler
+
+            echo "=== Health ==="
+            sleep 10
+            curl -sf http://localhost:8000/health && echo "Backend: OK"
+            SCHED=$(sudo docker inspect trinity-scheduler --format='{{.State.Health.Status}}')
+            echo "Scheduler: $SCHED"
+            [ "$SCHED" = "healthy" ] || echo "WARNING: scheduler not healthy yet"
+
+            echo "=== Error check ==="
+            sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || echo "No errors"
+
+            echo "=== Done ==="

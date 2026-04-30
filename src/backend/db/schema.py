@@ -12,6 +12,7 @@ Tables are organized by feature area:
 - Activities: agent_activities
 - Permissions: agent_permissions
 - Shared Folders: agent_shared_folder_config
+- Shared Files (outbound): agent_shared_files
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory
@@ -70,6 +71,7 @@ TABLES = {
             open_access INTEGER DEFAULT 0,
             group_auth_mode TEXT DEFAULT 'none',
             guardrails_config TEXT,
+            file_sharing_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )
@@ -289,6 +291,31 @@ TABLES = {
             consume_enabled INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Shared Files (outbound agent-to-user file sharing via public URL)
+    # -------------------------------------------------------------------------
+    "agent_shared_files": """
+        CREATE TABLE IF NOT EXISTS agent_shared_files (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mime_type TEXT,
+            download_token TEXT UNIQUE NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            one_time INTEGER DEFAULT 0,
+            consumed_at TEXT,
+            download_count INTEGER DEFAULT 0,
+            last_downloaded_at TEXT,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
         )
     """,
 
@@ -816,6 +843,11 @@ INDEXES = [
     # Shared folder indexes
     "CREATE INDEX IF NOT EXISTS idx_shared_folders_expose ON agent_shared_folder_config(expose_enabled)",
     "CREATE INDEX IF NOT EXISTS idx_shared_folders_consume ON agent_shared_folder_config(consume_enabled)",
+
+    # Shared files (outbound) indexes
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_agent ON agent_shared_files(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_token ON agent_shared_files(download_token)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",

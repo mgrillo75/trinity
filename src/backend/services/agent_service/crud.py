@@ -543,6 +543,36 @@ async def create_agent_internal(
                             # Source agent hasn't started yet or doesn't have shared volume
                             pass
 
+            # FILES-001 Step 2: if file sharing is enabled, create and mount the
+            # per-agent public volume (symmetric to the shared-folders expose flow).
+            if db.get_file_sharing_enabled(config.name):
+                public_volume_name = db.get_public_volume_name(config.name)
+                public_volume_created = False
+                try:
+                    await volume_get(public_volume_name)
+                except docker.errors.NotFound:
+                    await volume_create(
+                        name=public_volume_name,
+                        labels={
+                            'trinity.platform': 'agent-public',
+                            'trinity.agent-name': config.name,
+                        },
+                    )
+                    public_volume_created = True
+
+                if public_volume_created:
+                    try:
+                        await containers_run(
+                            'alpine',
+                            command='chown 1000:1000 /public',
+                            volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
+                            remove=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not fix public volume ownership: {e}")
+
+                volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
+
             # Get system-wide full_capabilities setting (not per-agent)
             full_capabilities = get_agent_full_capabilities()
 

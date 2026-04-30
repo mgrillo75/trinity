@@ -4,9 +4,8 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
 ## Concepts
 
-- **Setup Wizard** -- A one-time configuration flow that appears on your first visit to create the admin account.
-- **Admin Account** -- The primary account with full platform access, authenticated by username and password.
-- **Email Login** -- A passwordless authentication method where users receive a one-time code via email.
+- **Admin Account** -- The primary account with full platform access, authenticated by username and password. Created automatically from `ADMIN_PASSWORD` in `.env`.
+- **Email Login** -- A passwordless authentication method where users receive a one-time code via email. Requires an email service to be configured.
 
 ## How It Works
 
@@ -25,23 +24,28 @@ Install Trinity, create your admin account, and start managing agents in minutes
    cd trinity
    ```
 
-2. Start all services:
+2. Set `ADMIN_PASSWORD` in `.env` before first boot:
+
+   ```bash
+   cp .env.example .env
+   # Edit .env and set ADMIN_PASSWORD to a strong password (min 12 chars)
+   ```
+
+   The `admin` account is created automatically from this value on first start. If you leave it blank, a one-time setup token is printed to the backend logs — paste it into the setup wizard that appears on first visit.
+
+3. Start all services:
 
    ```bash
    ./scripts/deploy/start.sh
    ```
 
-   This builds the base agent image and starts the backend, frontend, MCP server, Redis, and Vector.
+   On first run, this detects if the base agent image is missing and builds it automatically (takes 5-10 minutes). Then starts the backend, frontend, MCP server, Redis, scheduler, and Vector.
 
-3. Open http://localhost in your browser.
-
-### First-Time Setup Wizard
-
-On your first visit, Trinity displays a setup wizard. Set your admin password -- it is stored with bcrypt hashing. This creates the `admin` account that you will use to log in.
+4. Open http://localhost in your browser.
 
 ### Logging In
 
-**Admin login:** Enter username `admin` and the password you set during setup.
+**Admin login:** Enter username `admin` and the `ADMIN_PASSWORD` you set in `.env`.
 
 **Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. The admin manages allowed email addresses under Settings > Email Whitelist.
 
@@ -63,10 +67,10 @@ On your first visit, Trinity displays a setup wizard. Set your admin password --
 ./scripts/deploy/start.sh
 
 # Rebuild services after code changes
-docker-compose build
+docker compose build --no-cache backend frontend mcp-server
 
 # View backend logs
-docker-compose logs -f backend
+docker compose logs -f backend
 ```
 
 ### Settings Page (Admin Only)

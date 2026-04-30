@@ -1,16 +1,28 @@
 /**
- * Audio utilities for voice chat (VOICE-004).
+ * Audio utilities for voice chat (VOICE-001).
  *
  * Handles microphone capture (PCM 16kHz mono) and audio playback (PCM 24kHz mono)
- * using the Web Audio API.
+ * using the Web Audio API. Uses AudioWorklet where available, falls back to
+ * deprecated ScriptProcessor for older browsers.
  */
 
 const INPUT_SAMPLE_RATE = 16000
 const OUTPUT_SAMPLE_RATE = 24000
 
+// AudioWorklet processor source (inlined to avoid separate file + HTTPS requirement)
+const _WORKLET_SRC = `
+class MicCapture extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch) this.port.postMessage(ch.slice());
+    return true;
+  }
+}
+registerProcessor('trinity-mic-capture', MicCapture);`
+
 /**
  * Start capturing audio from the microphone.
- * Returns raw PCM 16-bit LE chunks via the onData callback.
+ * Tries AudioWorklet first, falls back to ScriptProcessor.
  *
  * @param {Function} onData - Called with base64-encoded PCM chunks
  * @returns {{ stop: Function }} Control object
@@ -29,46 +41,71 @@ export async function startMicCapture(onData) {
   const audioContext = new AudioContext({ sampleRate: INPUT_SAMPLE_RATE })
   const source = audioContext.createMediaStreamSource(stream)
 
-  // Use ScriptProcessorNode for broad compatibility (AudioWorklet is better but
-  // requires a separate file and HTTPS for some browsers)
-  const bufferSize = 4096
-  const processor = audioContext.createScriptProcessor(bufferSize, 1, 1)
+  let processorNode = null
 
-  processor.onaudioprocess = (event) => {
-    const float32 = event.inputBuffer.getChannelData(0)
-    const pcm16 = float32ToPcm16(float32)
-    const base64 = arrayBufferToBase64(pcm16.buffer)
-    onData(base64)
+  // Try AudioWorklet first (avoids deprecated ScriptProcessor warning)
+  let useWorklet = false
+  try {
+    const blob = new Blob([_WORKLET_SRC], { type: 'application/javascript' })
+    const blobUrl = URL.createObjectURL(blob)
+    await audioContext.audioWorklet.addModule(blobUrl)
+    URL.revokeObjectURL(blobUrl)
+    const workletNode = new AudioWorkletNode(audioContext, 'trinity-mic-capture')
+    workletNode.port.onmessage = (e) => {
+      const base64 = arrayBufferToBase64(float32ToPcm16(e.data).buffer)
+      onData(base64)
+    }
+    source.connect(workletNode)
+    processorNode = workletNode
+    useWorklet = true
+  } catch (_) {
+    // Fall back to ScriptProcessor
   }
 
-  source.connect(processor)
-  processor.connect(audioContext.destination) // Required for ScriptProcessor to work
+  if (!useWorklet) {
+    const bufferSize = 4096
+    const processor = audioContext.createScriptProcessor(bufferSize, 1, 1)
+    processor.onaudioprocess = (event) => {
+      const float32 = event.inputBuffer.getChannelData(0)
+      const base64 = arrayBufferToBase64(float32ToPcm16(float32).buffer)
+      onData(base64)
+    }
+    source.connect(processor)
+    processor.connect(audioContext.destination)
+    processorNode = processor
+  }
 
   return {
     stop() {
-      processor.disconnect()
-      source.disconnect()
-      audioContext.close()
+      try { processorNode?.disconnect() } catch (_) {}
+      try { source.disconnect() } catch (_) {}
+      audioContext.close().catch(() => {})
       stream.getTracks().forEach(t => t.stop())
     }
   }
 }
 
 /**
- * Create an audio player for PCM 24kHz mono output.
+ * Create an audio player for PCM 24kHz mono output with amplitude monitoring.
  *
- * @returns {{ play: Function, stop: Function }}
+ * @returns {{ play: Function, getAmplitude: Function, stop: Function }}
  */
 export function createAudioPlayer() {
   let audioContext = null
   let nextStartTime = 0
+  let analyser = null
+  let analyserData = null
 
   function ensureContext() {
     if (!audioContext || audioContext.state === 'closed') {
       audioContext = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE })
       nextStartTime = 0
+      analyser = audioContext.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.6
+      analyserData = new Uint8Array(analyser.frequencyBinCount)
+      analyser.connect(audioContext.destination)
     }
-    // Resume if suspended (autoplay policy)
     if (audioContext.state === 'suspended') {
       audioContext.resume()
     }
@@ -88,27 +125,34 @@ export function createAudioPlayer() {
       const buffer = ctx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE)
       buffer.getChannelData(0).set(float32)
 
-      const source = ctx.createBufferSource()
-      source.buffer = buffer
+      const bufSource = ctx.createBufferSource()
+      bufSource.buffer = buffer
+      bufSource.connect(analyser)
 
-      source.connect(ctx.destination)
-
-      // Schedule seamlessly after the last chunk
       const now = ctx.currentTime
-      if (nextStartTime < now) {
-        nextStartTime = now
-      }
-      source.start(nextStartTime)
+      if (nextStartTime < now) nextStartTime = now
+      bufSource.start(nextStartTime)
       nextStartTime += buffer.duration
     },
 
     /**
-     * Stop playback and reset.
+     * Get current output amplitude as 0–1 float.
+     * Returns 0 if no audio is playing.
      */
+    getAmplitude() {
+      if (!analyser || !analyserData) return 0
+      analyser.getByteFrequencyData(analyserData)
+      let sum = 0
+      for (let i = 0; i < analyserData.length; i++) sum += analyserData[i]
+      return sum / (analyserData.length * 255)
+    },
+
     stop() {
       if (audioContext) {
         audioContext.close().catch(() => {})
         audioContext = null
+        analyser = null
+        analyserData = null
         nextStartTime = 0
       }
     }
@@ -117,7 +161,6 @@ export function createAudioPlayer() {
 
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
-/** Convert Float32Array [-1, 1] to Int16Array PCM */
 function float32ToPcm16(float32) {
   const pcm16 = new Int16Array(float32.length)
   for (let i = 0; i < float32.length; i++) {
@@ -127,7 +170,6 @@ function float32ToPcm16(float32) {
   return pcm16
 }
 
-/** Convert Int16Array PCM to Float32Array [-1, 1] */
 function pcm16ToFloat32(int16) {
   const float32 = new Float32Array(int16.length)
   for (let i = 0; i < int16.length; i++) {
@@ -136,22 +178,16 @@ function pcm16ToFloat32(int16) {
   return float32
 }
 
-/** Convert ArrayBuffer to base64 string */
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer)
   let binary = ''
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
   return btoa(binary)
 }
 
-/** Convert base64 string to ArrayBuffer */
 function base64ToArrayBuffer(base64) {
   const binary = atob(base64)
   const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
   return bytes.buffer
 }

@@ -1,10 +1,11 @@
 /**
- * Voice session composable for Trinity (VOICE-004).
+ * Voice session composable for Trinity (VOICE-001).
  *
  * Manages the full lifecycle of a voice conversation:
  * 1. POST /voice/start → get voice_session_id + websocket_url
  * 2. Open WebSocket → stream audio bidirectionally
- * 3. POST /voice/stop or WebSocket close → save transcript
+ * 3. Handle tool_call / tool_result events → update orb state
+ * 4. POST /voice/stop or WebSocket close → save transcript
  */
 
 import { ref, computed } from 'vue'
@@ -20,39 +21,44 @@ export function useVoiceSession(agentName) {
 
   // State
   const active = ref(false)
-  const status = ref('idle') // idle, connecting, listening, speaking, ended, error
+  const status = ref('idle')       // idle | connecting | listening | speaking | tool_calling | ended | error
   const muted = ref(false)
   const error = ref(null)
   const voiceSessionId = ref(null)
   const chatSessionId = ref(null)
-  const transcriptEntries = ref([]) // [{role, text}]
+  const transcriptEntries = ref([])
+  const toolName = ref(null)       // name of currently executing tool
+  const amplitude = ref(0)         // 0–1 output amplitude for orb animation
 
   // Internal
   let ws = null
   let micCapture = null
   let audioPlayer = null
+  let amplitudeTimer = null
 
   const isActive = computed(() => active.value)
   const isConnecting = computed(() => status.value === 'connecting')
   const isSpeaking = computed(() => status.value === 'speaking')
   const isListening = computed(() => status.value === 'listening')
+  const isToolCalling = computed(() => status.value === 'tool_calling')
 
   /**
    * Start a voice session.
    * @param {string|null} sessionId - Existing chat session to continue
+   * @param {string|null} voiceName - Gemini voice name override
    */
-  async function start(sessionId = null) {
+  async function start(sessionId = null, voiceName = null) {
     if (active.value) return
     error.value = null
     transcriptEntries.value = []
+    toolName.value = null
     status.value = 'connecting'
     active.value = true
 
     try {
-      // 1. Initialize session on backend
       const response = await axios.post(
         `/api/agents/${agentName}/voice/start`,
-        { session_id: sessionId },
+        { session_id: sessionId, voice_name: voiceName },
         { headers: authStore.authHeader }
       )
 
@@ -60,13 +66,11 @@ export function useVoiceSession(agentName) {
       chatSessionId.value = response.data.chat_session_id
       const wsPath = response.data.websocket_url
 
-      // 2. Open WebSocket with auth token
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${wsProtocol}//${window.location.host}${wsPath}?token=${authStore.token}`
       ws = new WebSocket(wsUrl)
 
       ws.onopen = async () => {
-        // 3. Start microphone capture
         try {
           audioPlayer = createAudioPlayer()
           micCapture = await startMicCapture((base64Audio) => {
@@ -75,6 +79,7 @@ export function useVoiceSession(agentName) {
             }
           })
           status.value = 'listening'
+          _startAmplitudePolling()
         } catch (micError) {
           error.value = 'Microphone access denied. Please allow microphone access and try again.'
           await stop()
@@ -86,22 +91,26 @@ export function useVoiceSession(agentName) {
           const msg = JSON.parse(event.data)
 
           if (msg.type === 'audio' && msg.data) {
-            // Play audio from Gemini
-            if (audioPlayer) {
-              audioPlayer.play(msg.data)
-            }
+            if (audioPlayer) audioPlayer.play(msg.data)
+
           } else if (msg.type === 'transcript') {
-            // Add transcript entry
-            transcriptEntries.value.push({
-              role: msg.role,
-              text: msg.text,
-            })
+            transcriptEntries.value.push({ role: msg.role, text: msg.text })
+
           } else if (msg.type === 'status') {
             if (msg.state === 'ended') {
               _cleanup()
             } else {
               status.value = msg.state
             }
+
+          } else if (msg.type === 'tool_call') {
+            status.value = 'tool_calling'
+            toolName.value = msg.tool || null
+
+          } else if (msg.type === 'tool_result') {
+            // Tool finished — Gemini will continue speaking
+            toolName.value = null
+            status.value = 'listening'
           }
         } catch (e) {
           console.error('Voice WS message parse error:', e)
@@ -113,9 +122,7 @@ export function useVoiceSession(agentName) {
         _cleanup()
       }
 
-      ws.onclose = () => {
-        _cleanup()
-      }
+      ws.onclose = () => { _cleanup() }
 
     } catch (err) {
       console.error('Voice start error:', err)
@@ -124,22 +131,13 @@ export function useVoiceSession(agentName) {
     }
   }
 
-  /**
-   * Stop the voice session.
-   */
   async function stop() {
     if (!active.value) return
 
-    // Send end signal
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(JSON.stringify({ type: 'end' }))
-      } catch (e) {
-        // Ignore
-      }
+      try { ws.send(JSON.stringify({ type: 'end' })) } catch (_) {}
     }
 
-    // Also call the stop endpoint to ensure transcript is saved
     if (voiceSessionId.value) {
       try {
         await axios.post(
@@ -148,7 +146,6 @@ export function useVoiceSession(agentName) {
           { headers: authStore.authHeader }
         )
       } catch (e) {
-        // The WebSocket close handler also saves, so this is a fallback
         console.warn('Voice stop API error (transcript may already be saved):', e)
       }
     }
@@ -156,28 +153,36 @@ export function useVoiceSession(agentName) {
     _cleanup()
   }
 
-  /**
-   * Toggle mute.
-   */
   function toggleMute() {
     muted.value = !muted.value
   }
 
-  /**
-   * Internal cleanup.
-   */
+  function _startAmplitudePolling() {
+    _stopAmplitudePolling()
+    amplitudeTimer = setInterval(() => {
+      if (audioPlayer) {
+        amplitude.value = audioPlayer.getAmplitude()
+      }
+    }, 30) // ~33fps polling
+  }
+
+  function _stopAmplitudePolling() {
+    if (amplitudeTimer !== null) {
+      clearInterval(amplitudeTimer)
+      amplitudeTimer = null
+    }
+    amplitude.value = 0
+  }
+
   function _cleanup() {
     active.value = false
     status.value = 'idle'
+    toolName.value = null
 
-    if (micCapture) {
-      micCapture.stop()
-      micCapture = null
-    }
-    if (audioPlayer) {
-      audioPlayer.stop()
-      audioPlayer = null
-    }
+    _stopAmplitudePolling()
+
+    if (micCapture) { micCapture.stop(); micCapture = null }
+    if (audioPlayer) { audioPlayer.stop(); audioPlayer = null }
     if (ws) {
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close()
@@ -188,21 +193,16 @@ export function useVoiceSession(agentName) {
 
   return {
     // State
-    active,
-    isActive,
-    status,
-    isConnecting,
-    isSpeaking,
-    isListening,
+    active, isActive,
+    status, isConnecting, isSpeaking, isListening, isToolCalling,
     muted,
     error,
-    voiceSessionId,
-    chatSessionId,
+    voiceSessionId, chatSessionId,
     transcriptEntries,
+    toolName,
+    amplitude,
 
     // Actions
-    start,
-    stop,
-    toggleMute,
+    start, stop, toggleMute,
   }
 }

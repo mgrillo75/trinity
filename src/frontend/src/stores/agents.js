@@ -644,6 +644,38 @@ export const useAgentsStore = defineStore('agents', {
       this.sortBy = sortBy
     },
 
+    // Outbound File Sharing (FILES-001)
+    async getFileSharingStatus(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/file-sharing`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setFileSharingStatus(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/file-sharing`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async listSharedFiles(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/shared-files`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async revokeSharedFile(name, fileId) {
+      const authStore = useAuthStore()
+      await axios.delete(`/api/agents/${name}/shared-files/${fileId}`, {
+        headers: authStore.authHeader
+      })
+    },
+
     // Shared Folders Actions (Phase 9.11: Agent Shared Folders)
     async getAgentFolders(name) {
       const authStore = useAuthStore()

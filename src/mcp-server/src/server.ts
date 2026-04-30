@@ -22,6 +22,7 @@ import { createExecutionTools } from "./tools/executions.js";
 import { createEventTools } from "./tools/events.js";
 import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
+import { createFileTools } from "./tools/files.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -195,6 +196,7 @@ export async function createServer(config: ServerConfig = {}) {
     createScheduleTools(client, requireApiKey),
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
+    createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createSubscriptionTools(client, requireApiKey),
     createMonitoringTools(client, requireApiKey),
     createNeverminedTools(client, requireApiKey),

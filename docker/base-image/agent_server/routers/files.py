@@ -164,14 +164,25 @@ PROTECTED_PATHS = [
     ".mcp.json.template",
 ]
 
-# Paths that cannot be edited (subset of PROTECTED_PATHS)
-# CLAUDE.md and .mcp.json ARE editable since users need to modify them
+# Paths that cannot be edited via the file-write endpoint.
+#
+# .mcp.json and .mcp.json.template were historically editable here because
+# "users need to modify them" — but raw editing of either is RCE-by-config:
+# tool `command:` fields run as the agent process. Owners modify MCP servers
+# at agent-creation time via the template, or via the platform-internal
+# /api/credentials/update flow which regenerates .mcp.json from the template
+# with envsubst (no arbitrary content). See #590 (AISEC-C2).
+#
+# CLAUDE.md is intentionally NOT here — owners do edit their agent's
+# instructions directly.
 EDIT_PROTECTED_PATHS = [
     ".trinity",
     ".git",
     ".gitignore",
     ".env",
+    ".mcp.json",
     ".mcp.json.template",
+    ".credentials.enc",
 ]
 
 

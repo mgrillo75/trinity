@@ -47,6 +47,30 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 
+def _safe_add_column(cursor, table: str, column: str, ddl: str, *, log_msg: str | None = None) -> bool:
+    """Idempotent, concurrent-safe ALTER TABLE ADD COLUMN.
+
+    Two uvicorn workers starting simultaneously can both pass the PRAGMA
+    check before either commits its ALTER (#456 / #389). Catch the
+    duplicate-column race and treat it as success.
+
+    Returns True if this caller added the column, False if it was already
+    present (either by a prior run or another worker winning the race).
+    """
+    cursor.execute(f"PRAGMA table_info({table})")
+    if column in {row[1] for row in cursor.fetchall()}:
+        return False
+    if log_msg:
+        print(log_msg)
+    try:
+        cursor.execute(ddl)
+        return True
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e).lower():
+            return False
+        raise
+
+
 def run_all_migrations(cursor, conn):
     """Run all pending migrations in order. Called twice from init_database().
 
@@ -143,10 +167,6 @@ def _migrate_agent_sharing_table(cursor, conn):
 
 def _migrate_schedule_executions_observability(cursor, conn):
     """Add observability columns to schedule_executions table."""
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    # Add new columns if they don't exist
     new_columns = [
         ("context_used", "INTEGER"),
         ("context_max", "INTEGER"),
@@ -156,144 +176,156 @@ def _migrate_schedule_executions_observability(cursor, conn):
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to schedule_executions...")
-            cursor.execute(f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col_name,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to schedule_executions...",
+        )
 
     conn.commit()
 
 
 def _migrate_mcp_api_keys_agent_scope(cursor, conn):
     """Add agent_name and scope columns to mcp_api_keys table for agent-to-agent collaboration."""
-    cursor.execute("PRAGMA table_info(mcp_api_keys)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    # Add new columns if they don't exist
     new_columns = [
         ("agent_name", "TEXT"),  # Which agent owns this key (NULL for user keys)
         ("scope", "TEXT DEFAULT 'user'")  # "user" or "agent"
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to mcp_api_keys for agent collaboration...")
-            cursor.execute(f"ALTER TABLE mcp_api_keys ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "mcp_api_keys",
+            col_name,
+            f"ALTER TABLE mcp_api_keys ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to mcp_api_keys for agent collaboration...",
+        )
 
     conn.commit()
 
 
 def _migrate_agent_ownership_system_flag(cursor, conn):
     """Add is_system column to agent_ownership table for system agent protection."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "is_system" not in columns:
-        print("Adding is_system column to agent_ownership for system agent protection...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN is_system INTEGER DEFAULT 0")
-        conn.commit()
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "is_system",
+        "ALTER TABLE agent_ownership ADD COLUMN is_system INTEGER DEFAULT 0",
+        log_msg="Adding is_system column to agent_ownership for system agent protection...",
+    )
+    conn.commit()
 
 
 def _migrate_agent_ownership_platform_key(cursor, conn):
     """Add use_platform_api_key column to agent_ownership table for per-agent API key control."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "use_platform_api_key" not in columns:
-        print("Adding use_platform_api_key column to agent_ownership for per-agent API key control...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN use_platform_api_key INTEGER DEFAULT 1")
-        conn.commit()
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "use_platform_api_key",
+        "ALTER TABLE agent_ownership ADD COLUMN use_platform_api_key INTEGER DEFAULT 1",
+        log_msg="Adding use_platform_api_key column to agent_ownership for per-agent API key control...",
+    )
+    conn.commit()
 
 
 def _migrate_agent_git_config_source_branch(cursor, conn):
     """Add source_branch and source_mode columns to agent_git_config for GitHub source tracking."""
-    cursor.execute("PRAGMA table_info(agent_git_config)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("source_branch", "TEXT DEFAULT 'main'"),  # Branch to pull from
         ("source_mode", "INTEGER DEFAULT 0")  # 1 = track source branch directly, 0 = legacy working branch
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to agent_git_config for GitHub source tracking...")
-            cursor.execute(f"ALTER TABLE agent_git_config ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "agent_git_config",
+            col_name,
+            f"ALTER TABLE agent_git_config ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to agent_git_config for GitHub source tracking...",
+        )
 
     conn.commit()
 
 
 def _migrate_agent_ownership_autonomy(cursor, conn):
     """Add autonomy_enabled column to agent_ownership table for autonomous scheduling control."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "autonomy_enabled" not in columns:
-        print("Adding autonomy_enabled column to agent_ownership for autonomous scheduling...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN autonomy_enabled INTEGER DEFAULT 0")
-        conn.commit()
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "autonomy_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN autonomy_enabled INTEGER DEFAULT 0",
+        log_msg="Adding autonomy_enabled column to agent_ownership for autonomous scheduling...",
+    )
+    conn.commit()
 
 
 def _migrate_agent_ownership_resource_limits(cursor, conn):
     """Add memory_limit and cpu_limit columns to agent_ownership table for per-agent resource configuration."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("memory_limit", "TEXT"),  # e.g., "4g", "8g", "16g"
         ("cpu_limit", "TEXT")  # e.g., "2", "4", "8"
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to agent_ownership for resource configuration...")
-            cursor.execute(f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col_name,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to agent_ownership for resource configuration...",
+        )
 
     conn.commit()
 
 
 def _migrate_agent_ownership_full_capabilities(cursor, conn):
     """Add full_capabilities column to agent_ownership table for container security settings."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "full_capabilities" not in columns:
-        print("Adding full_capabilities column to agent_ownership for container security settings...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN full_capabilities INTEGER DEFAULT 0")
-        conn.commit()
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "full_capabilities",
+        "ALTER TABLE agent_ownership ADD COLUMN full_capabilities INTEGER DEFAULT 0",
+        log_msg="Adding full_capabilities column to agent_ownership for container security settings...",
+    )
+    conn.commit()
 
 
 def _migrate_agent_ownership_read_only_mode(cursor, conn):
     """Add read_only_mode and read_only_config columns to agent_ownership table for code protection."""
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("read_only_mode", "INTEGER DEFAULT 0"),  # 0 = disabled, 1 = enabled
         ("read_only_config", "TEXT")  # JSON config for blocked/allowed patterns
     ]
 
     for col_name, col_def in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to agent_ownership for read-only mode...")
-            cursor.execute(f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_def}")
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col_name,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_def}",
+            log_msg=f"Adding {col_name} column to agent_ownership for read-only mode...",
+        )
 
     conn.commit()
 
 
 def _migrate_agent_schedules_execution_config(cursor, conn):
     """Add timeout_seconds and allowed_tools columns to agent_schedules table for per-schedule execution config."""
-    cursor.execute("PRAGMA table_info(agent_schedules)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("timeout_seconds", "INTEGER DEFAULT 900"),  # Default 15 minutes
         ("allowed_tools", "TEXT")  # JSON array of allowed tools, NULL = all tools
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to agent_schedules for execution configuration...")
-            cursor.execute(f"ALTER TABLE agent_schedules ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "agent_schedules",
+            col_name,
+            f"ALTER TABLE agent_schedules ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to agent_schedules for execution configuration...",
+        )
 
     conn.commit()
 
@@ -332,9 +364,6 @@ def _migrate_execution_origin_tracking(cursor, conn):
     - source_mcp_key_id: MCP API key ID used (for MCP calls)
     - source_mcp_key_name: MCP API key name (denormalized)
     """
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("source_user_id", "INTEGER"),
         ("source_user_email", "TEXT"),
@@ -344,9 +373,13 @@ def _migrate_execution_origin_tracking(cursor, conn):
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to schedule_executions for origin tracking...")
-            cursor.execute(f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col_name,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to schedule_executions for origin tracking...",
+        )
 
     conn.commit()
 
@@ -357,13 +390,13 @@ def _migrate_execution_session_tracking(cursor, conn):
     Enables "Continue Execution as Chat" feature by storing Claude Code's
     session_id, which can be used with --resume to continue the session.
     """
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "claude_session_id" not in columns:
-        print("Adding claude_session_id column to schedule_executions for session resume...")
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN claude_session_id TEXT")
-
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "claude_session_id",
+        "ALTER TABLE schedule_executions ADD COLUMN claude_session_id TEXT",
+        log_msg="Adding claude_session_id column to schedule_executions for session resume...",
+    )
     conn.commit()
 
 
@@ -396,13 +429,13 @@ def _migrate_agent_ownership_subscription_id(cursor, conn):
 
     Links agents to their assigned subscription for Claude Max/Pro authentication.
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "subscription_id" not in columns:
-        print("Adding subscription_id column to agent_ownership for subscription management...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN subscription_id TEXT REFERENCES subscription_credentials(id)")
-
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "subscription_id",
+        "ALTER TABLE agent_ownership ADD COLUMN subscription_id TEXT REFERENCES subscription_credentials(id)",
+        log_msg="Adding subscription_id column to agent_ownership for subscription management...",
+    )
     conn.commit()
 
 
@@ -590,13 +623,13 @@ def _migrate_agent_ownership_parallel_capacity(cursor, conn):
     Configures per-agent parallel execution capacity for the /task endpoint.
     Range: 1-10, Default: 3.
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "max_parallel_tasks" not in columns:
-        print("Adding max_parallel_tasks column to agent_ownership for parallel capacity...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN max_parallel_tasks INTEGER DEFAULT 3")
-
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "max_parallel_tasks",
+        "ALTER TABLE agent_ownership ADD COLUMN max_parallel_tasks INTEGER DEFAULT 3",
+        log_msg="Adding max_parallel_tasks column to agent_ownership for parallel capacity...",
+    )
     conn.commit()
 
 
@@ -606,22 +639,20 @@ def _migrate_schedule_model_selection(cursor, conn):
     - agent_schedules.model: Model to use when schedule fires (NULL = agent default)
     - schedule_executions.model_used: Records which model was actually used
     """
-    # Add model to agent_schedules
-    cursor.execute("PRAGMA table_info(agent_schedules)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "model" not in columns:
-        print("Adding model column to agent_schedules for model selection...")
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN model TEXT")
-
-    # Add model_used to schedule_executions
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "model_used" not in columns:
-        print("Adding model_used column to schedule_executions for model audit...")
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN model_used TEXT")
-
+    _safe_add_column(
+        cursor,
+        "agent_schedules",
+        "model",
+        "ALTER TABLE agent_schedules ADD COLUMN model TEXT",
+        log_msg="Adding model column to agent_schedules for model selection...",
+    )
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "model_used",
+        "ALTER TABLE schedule_executions ADD COLUMN model_used TEXT",
+        log_msg="Adding model_used column to schedule_executions for model audit...",
+    )
     conn.commit()
 
 
@@ -672,18 +703,19 @@ def _migrate_agent_avatar_columns(cursor, conn):
     - avatar_identity_prompt: User's character description for avatar generation
     - avatar_updated_at: ISO timestamp for cache-busting
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
     new_columns = [
         ("avatar_identity_prompt", "TEXT"),
         ("avatar_updated_at", "TEXT"),
     ]
 
     for col_name, col_type in new_columns:
-        if col_name not in columns:
-            print(f"Adding {col_name} column to agent_ownership for avatar support...")
-            cursor.execute(f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_type}")
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col_name,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to agent_ownership for avatar support...",
+        )
 
     conn.commit()
 
@@ -731,13 +763,13 @@ def _migrate_agent_ownership_default_avatar(cursor, conn):
     Tracks whether an agent's avatar was auto-generated (default) vs custom.
     Allows re-runs to skip custom avatars and overwrite stale defaults.
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "is_default_avatar" not in columns:
-        print("Adding is_default_avatar column to agent_ownership for default avatar support...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN is_default_avatar INTEGER DEFAULT 0")
-
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "is_default_avatar",
+        "ALTER TABLE agent_ownership ADD COLUMN is_default_avatar INTEGER DEFAULT 0",
+        log_msg="Adding is_default_avatar column to agent_ownership for default avatar support...",
+    )
     conn.commit()
 
 
@@ -748,13 +780,13 @@ def _migrate_agent_ownership_execution_timeout(cursor, conn):
     scheduler, MCP, paid endpoints) read from this setting when no explicit timeout
     is provided. Default: 900 seconds (15 minutes).
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "execution_timeout_seconds" not in columns:
-        print("Adding execution_timeout_seconds column to agent_ownership for per-agent timeout...")
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN execution_timeout_seconds INTEGER DEFAULT 900")
-
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "execution_timeout_seconds",
+        "ALTER TABLE agent_ownership ADD COLUMN execution_timeout_seconds INTEGER DEFAULT 900",
+        log_msg="Adding execution_timeout_seconds column to agent_ownership for per-agent timeout...",
+    )
     conn.commit()
 
 
@@ -816,11 +848,13 @@ def _migrate_chat_messages_source_column(cursor, conn):
     Distinguishes voice messages from text messages.
     Values: 'text' (default), 'voice'.
     """
-    try:
-        cursor.execute("ALTER TABLE chat_messages ADD COLUMN source TEXT DEFAULT 'text'")
-        conn.commit()
-    except Exception:
-        pass  # Column already exists
+    _safe_add_column(
+        cursor,
+        "chat_messages",
+        "source",
+        "ALTER TABLE chat_messages ADD COLUMN source TEXT DEFAULT 'text'",
+    )
+    conn.commit()
 
 
 def _migrate_agent_ownership_guardrails(cursor, conn):
@@ -830,11 +864,13 @@ def _migrate_agent_ownership_guardrails(cursor, conn):
     extra_bash_deny, extra_path_deny) as a JSON blob. NULL means "use
     platform baseline only".
     """
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    columns = {row[1] for row in cursor.fetchall()}
-    if "guardrails_config" not in columns:
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN guardrails_config TEXT")
-        conn.commit()
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "guardrails_config",
+        "ALTER TABLE agent_ownership ADD COLUMN guardrails_config TEXT",
+    )
+    conn.commit()
 
 
 def _migrate_agent_ownership_voice_prompt(cursor, conn):
@@ -842,11 +878,13 @@ def _migrate_agent_ownership_voice_prompt(cursor, conn):
 
     Stores the per-agent voice personality prompt for Gemini Live API.
     """
-    try:
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN voice_system_prompt TEXT")
-        conn.commit()
-    except Exception:
-        pass  # Column already exists
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "voice_system_prompt",
+        "ALTER TABLE agent_ownership ADD COLUMN voice_system_prompt TEXT",
+    )
+    conn.commit()
 
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
@@ -922,25 +960,22 @@ def _migrate_subscription_usage_tracking(cursor, conn):
     - chat_sessions: subscription_id (active when session started)
     - schedule_executions: subscription_id (snapshotted at record time)
     """
-    cursor.execute("PRAGMA table_info(chat_messages)")
-    chat_msg_cols = {row[1] for row in cursor.fetchall()}
-
-    if "subscription_id" not in chat_msg_cols:
-        cursor.execute("ALTER TABLE chat_messages ADD COLUMN subscription_id TEXT")
-    if "output_tokens" not in chat_msg_cols:
-        cursor.execute("ALTER TABLE chat_messages ADD COLUMN output_tokens INTEGER")
-
-    cursor.execute("PRAGMA table_info(chat_sessions)")
-    chat_sess_cols = {row[1] for row in cursor.fetchall()}
-
-    if "subscription_id" not in chat_sess_cols:
-        cursor.execute("ALTER TABLE chat_sessions ADD COLUMN subscription_id TEXT")
-
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    exec_cols = {row[1] for row in cursor.fetchall()}
-
-    if "subscription_id" not in exec_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN subscription_id TEXT")
+    _safe_add_column(
+        cursor, "chat_messages", "subscription_id",
+        "ALTER TABLE chat_messages ADD COLUMN subscription_id TEXT",
+    )
+    _safe_add_column(
+        cursor, "chat_messages", "output_tokens",
+        "ALTER TABLE chat_messages ADD COLUMN output_tokens INTEGER",
+    )
+    _safe_add_column(
+        cursor, "chat_sessions", "subscription_id",
+        "ALTER TABLE chat_sessions ADD COLUMN subscription_id TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "subscription_id",
+        "ALTER TABLE schedule_executions ADD COLUMN subscription_id TEXT",
+    )
 
     # Indexes for usage queries
     cursor.execute(
@@ -961,14 +996,14 @@ def _migrate_execution_fan_out_id(cursor, conn):
     Links individual execution records back to a parent fan-out operation
     for observability and result aggregation.
     """
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "fan_out_id" not in columns:
-        print("Adding fan_out_id column to schedule_executions for fan-out linkage...")
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN fan_out_id TEXT")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)")
-
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "fan_out_id",
+        "ALTER TABLE schedule_executions ADD COLUMN fan_out_id TEXT",
+        log_msg="Adding fan_out_id column to schedule_executions for fan-out linkage...",
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)")
     conn.commit()
 
 
@@ -1030,20 +1065,24 @@ def _migrate_access_control(cursor, conn):
     - access_requests: new table for pending per-agent access requests
     """
     # 1. agent_ownership columns
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    ao_cols = {row[1] for row in cursor.fetchall()}
-    if "require_email" not in ao_cols:
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN require_email INTEGER DEFAULT 0")
-    if "open_access" not in ao_cols:
-        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN open_access INTEGER DEFAULT 0")
+    _safe_add_column(
+        cursor, "agent_ownership", "require_email",
+        "ALTER TABLE agent_ownership ADD COLUMN require_email INTEGER DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "open_access",
+        "ALTER TABLE agent_ownership ADD COLUMN open_access INTEGER DEFAULT 0",
+    )
 
     # 2. telegram_chat_links columns
-    cursor.execute("PRAGMA table_info(telegram_chat_links)")
-    tcl_cols = {row[1] for row in cursor.fetchall()}
-    if "verified_email" not in tcl_cols:
-        cursor.execute("ALTER TABLE telegram_chat_links ADD COLUMN verified_email TEXT")
-    if "verified_at" not in tcl_cols:
-        cursor.execute("ALTER TABLE telegram_chat_links ADD COLUMN verified_at TEXT")
+    _safe_add_column(
+        cursor, "telegram_chat_links", "verified_email",
+        "ALTER TABLE telegram_chat_links ADD COLUMN verified_email TEXT",
+    )
+    _safe_add_column(
+        cursor, "telegram_chat_links", "verified_at",
+        "ALTER TABLE telegram_chat_links ADD COLUMN verified_at TEXT",
+    )
 
     # 3. access_requests table
     cursor.execute("""
@@ -1104,14 +1143,12 @@ def _migrate_email_whitelist_default_role(cursor, conn):
     buggy default going forward. It does NOT touch `users.role`, so users who
     have already logged in and been promoted keep their current role.
     """
-    cursor.execute("PRAGMA table_info(email_whitelist)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "default_role" not in columns:
-        cursor.execute(
-            "ALTER TABLE email_whitelist ADD COLUMN default_role TEXT NOT NULL DEFAULT 'user'"
-        )
-
+    _safe_add_column(
+        cursor,
+        "email_whitelist",
+        "default_role",
+        "ALTER TABLE email_whitelist ADD COLUMN default_role TEXT NOT NULL DEFAULT 'user'",
+    )
     conn.commit()
 
 
@@ -1158,20 +1195,20 @@ def _migrate_backlog_support(cursor, conn):
     - Partial index on (agent_name, queued_at) WHERE status='queued' for cheap FIFO claim.
     """
     # schedule_executions columns
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    se_cols = {row[1] for row in cursor.fetchall()}
-    if "queued_at" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN queued_at TEXT")
-    if "backlog_metadata" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN backlog_metadata TEXT")
+    _safe_add_column(
+        cursor, "schedule_executions", "queued_at",
+        "ALTER TABLE schedule_executions ADD COLUMN queued_at TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "backlog_metadata",
+        "ALTER TABLE schedule_executions ADD COLUMN backlog_metadata TEXT",
+    )
 
     # agent_ownership column
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    ao_cols = {row[1] for row in cursor.fetchall()}
-    if "max_backlog_depth" not in ao_cols:
-        cursor.execute(
-            "ALTER TABLE agent_ownership ADD COLUMN max_backlog_depth INTEGER DEFAULT 50"
-        )
+    _safe_add_column(
+        cursor, "agent_ownership", "max_backlog_depth",
+        "ALTER TABLE agent_ownership ADD COLUMN max_backlog_depth INTEGER DEFAULT 50",
+    )
 
     # Partial index for efficient FIFO claim of queued rows
     cursor.execute(
@@ -1197,25 +1234,29 @@ def _migrate_scheduler_retry_support(cursor, conn):
     retries amplified load during multi-hour subscription outages.
     """
     # agent_schedules columns
-    cursor.execute("PRAGMA table_info(agent_schedules)")
-    as_cols = {row[1] for row in cursor.fetchall()}
-
-    if "max_retries" not in as_cols:
-        # Default 0 for existing schedules (opt-in); schema default is also 0 since #476
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN max_retries INTEGER DEFAULT 0")
-    if "retry_delay_seconds" not in as_cols:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN retry_delay_seconds INTEGER DEFAULT 60")
+    # Default 0 for existing schedules (opt-in); schema default is also 0 since #476.
+    _safe_add_column(
+        cursor, "agent_schedules", "max_retries",
+        "ALTER TABLE agent_schedules ADD COLUMN max_retries INTEGER DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "retry_delay_seconds",
+        "ALTER TABLE agent_schedules ADD COLUMN retry_delay_seconds INTEGER DEFAULT 60",
+    )
 
     # schedule_executions columns
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    se_cols = {row[1] for row in cursor.fetchall()}
-
-    if "attempt_number" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN attempt_number INTEGER DEFAULT 1")
-    if "retry_of_execution_id" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_of_execution_id TEXT")
-    if "retry_scheduled_at" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_scheduled_at TEXT")
+    _safe_add_column(
+        cursor, "schedule_executions", "attempt_number",
+        "ALTER TABLE schedule_executions ADD COLUMN attempt_number INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "retry_of_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN retry_of_execution_id TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "retry_scheduled_at",
+        "ALTER TABLE schedule_executions ADD COLUMN retry_scheduled_at TEXT",
+    )
 
     # Index for finding pending retries on startup
     cursor.execute(
@@ -1239,28 +1280,36 @@ def _migrate_validation_support(cursor, conn):
     - schedule_executions.validates_execution_id: FK to execution being validated (for validation records)
     """
     # agent_schedules columns
-    cursor.execute("PRAGMA table_info(agent_schedules)")
-    as_cols = {row[1] for row in cursor.fetchall()}
-
-    if "validation_enabled" not in as_cols:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_enabled INTEGER DEFAULT 0")
-    if "validation_prompt" not in as_cols:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_prompt TEXT")
-    if "validation_timeout_seconds" not in as_cols:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_timeout_seconds INTEGER DEFAULT 120")
+    _safe_add_column(
+        cursor, "agent_schedules", "validation_enabled",
+        "ALTER TABLE agent_schedules ADD COLUMN validation_enabled INTEGER DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "validation_prompt",
+        "ALTER TABLE agent_schedules ADD COLUMN validation_prompt TEXT",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "validation_timeout_seconds",
+        "ALTER TABLE agent_schedules ADD COLUMN validation_timeout_seconds INTEGER DEFAULT 120",
+    )
 
     # schedule_executions columns
-    cursor.execute("PRAGMA table_info(schedule_executions)")
-    se_cols = {row[1] for row in cursor.fetchall()}
-
-    if "business_status" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN business_status TEXT")
-    if "validated_at" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validated_at TEXT")
-    if "validation_execution_id" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validation_execution_id TEXT")
-    if "validates_execution_id" not in se_cols:
-        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validates_execution_id TEXT")
+    _safe_add_column(
+        cursor, "schedule_executions", "business_status",
+        "ALTER TABLE schedule_executions ADD COLUMN business_status TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "validated_at",
+        "ALTER TABLE schedule_executions ADD COLUMN validated_at TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "validation_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN validation_execution_id TEXT",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "validates_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN validates_execution_id TEXT",
+    )
 
     # Indexes for validation queries
     cursor.execute(
@@ -1280,26 +1329,22 @@ def _migrate_group_auth_mode(cursor, conn):
     Supports: 'none' (default, current behavior), 'any_verified' (at least one verified member).
     """
     # Add group_auth_mode to agent_ownership
-    cursor.execute("PRAGMA table_info(agent_ownership)")
-    ao_cols = {row[1] for row in cursor.fetchall()}
-    if "group_auth_mode" not in ao_cols:
-        cursor.execute(
-            "ALTER TABLE agent_ownership ADD COLUMN group_auth_mode TEXT DEFAULT 'none'"
-        )
+    if _safe_add_column(
+        cursor, "agent_ownership", "group_auth_mode",
+        "ALTER TABLE agent_ownership ADD COLUMN group_auth_mode TEXT DEFAULT 'none'",
+    ):
         logger.info("Added group_auth_mode column to agent_ownership")
 
-    # Add verified_by_email to telegram_group_configs
-    cursor.execute("PRAGMA table_info(telegram_group_configs)")
-    tg_cols = {row[1] for row in cursor.fetchall()}
-    if "verified_by_email" not in tg_cols:
-        cursor.execute(
-            "ALTER TABLE telegram_group_configs ADD COLUMN verified_by_email TEXT"
-        )
+    # Add verified_by_email + verified_at to telegram_group_configs
+    if _safe_add_column(
+        cursor, "telegram_group_configs", "verified_by_email",
+        "ALTER TABLE telegram_group_configs ADD COLUMN verified_by_email TEXT",
+    ):
         logger.info("Added verified_by_email column to telegram_group_configs")
-    if "verified_at" not in tg_cols:
-        cursor.execute(
-            "ALTER TABLE telegram_group_configs ADD COLUMN verified_at TEXT"
-        )
+    if _safe_add_column(
+        cursor, "telegram_group_configs", "verified_at",
+        "ALTER TABLE telegram_group_configs ADD COLUMN verified_at TEXT",
+    ):
         logger.info("Added verified_at column to telegram_group_configs")
 
     conn.commit()
@@ -1378,13 +1423,13 @@ def _migrate_audit_log_table(cursor, conn):
 
 def _migrate_agent_git_config_pat(cursor, conn):
     """Add github_pat_encrypted column to agent_git_config for per-agent GitHub PAT (#347)."""
-    cursor.execute("PRAGMA table_info(agent_git_config)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "github_pat_encrypted" not in columns:
-        print("Adding github_pat_encrypted column to agent_git_config for per-agent GitHub PAT...")
-        cursor.execute("ALTER TABLE agent_git_config ADD COLUMN github_pat_encrypted TEXT")
-
+    _safe_add_column(
+        cursor,
+        "agent_git_config",
+        "github_pat_encrypted",
+        "ALTER TABLE agent_git_config ADD COLUMN github_pat_encrypted TEXT",
+        log_msg="Adding github_pat_encrypted column to agent_git_config for per-agent GitHub PAT...",
+    )
     conn.commit()
 
 
@@ -1395,51 +1440,47 @@ def _migrate_sync_health(cursor, conn):
     - agent_git_config gets auto_sync_enabled and freeze_schedules_if_sync_failing
       so operators can opt in to the 15-min heartbeat and pause schedules when
       sync breaks.
-    Idempotent: guards every change with PRAGMA table_info / table-existence checks.
+    Idempotent and concurrent-safe: ALTER TABLE goes through _safe_add_column
+    which catches the duplicate-column race between workers (#456); CREATE
+    TABLE uses IF NOT EXISTS, which SQLite handles atomically.
     """
     # 1. New columns on agent_git_config
-    cursor.execute("PRAGMA table_info(agent_git_config)")
-    cols = {row[1] for row in cursor.fetchall()}
-    if "auto_sync_enabled" not in cols:
-        print("Adding auto_sync_enabled column to agent_git_config for auto-sync cadence (#389)...")
-        cursor.execute(
-            "ALTER TABLE agent_git_config ADD COLUMN auto_sync_enabled INTEGER DEFAULT 0"
-        )
-    if "freeze_schedules_if_sync_failing" not in cols:
-        print(
-            "Adding freeze_schedules_if_sync_failing column to agent_git_config (#389)..."
-        )
-        cursor.execute(
-            "ALTER TABLE agent_git_config "
-            "ADD COLUMN freeze_schedules_if_sync_failing INTEGER DEFAULT 0"
-        )
-
-    # 2. New agent_sync_state table
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_sync_state'"
+    _safe_add_column(
+        cursor,
+        "agent_git_config",
+        "auto_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN auto_sync_enabled INTEGER DEFAULT 0",
+        log_msg="Adding auto_sync_enabled column to agent_git_config for auto-sync cadence (#389)...",
     )
-    if cursor.fetchone() is None:
-        print("Creating agent_sync_state table for sync-health observability (#389)...")
-        cursor.execute(
-            """
-            CREATE TABLE agent_sync_state (
-                agent_name TEXT PRIMARY KEY,
-                last_sync_at TEXT,
-                last_sync_status TEXT,
-                consecutive_failures INTEGER DEFAULT 0,
-                last_error_summary TEXT,
-                last_remote_sha_main TEXT,
-                last_remote_sha_working TEXT,
-                ahead_main INTEGER DEFAULT 0,
-                behind_main INTEGER DEFAULT 0,
-                ahead_working INTEGER DEFAULT 0,
-                behind_working INTEGER DEFAULT 0,
-                last_check_at TEXT,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
-            )
-            """
+    _safe_add_column(
+        cursor,
+        "agent_git_config",
+        "freeze_schedules_if_sync_failing",
+        "ALTER TABLE agent_git_config ADD COLUMN freeze_schedules_if_sync_failing INTEGER DEFAULT 0",
+        log_msg="Adding freeze_schedules_if_sync_failing column to agent_git_config (#389)...",
+    )
+
+    # 2. New agent_sync_state table (CREATE TABLE IF NOT EXISTS is atomic)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_sync_state (
+            agent_name TEXT PRIMARY KEY,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            last_error_summary TEXT,
+            last_remote_sha_main TEXT,
+            last_remote_sha_working TEXT,
+            ahead_main INTEGER DEFAULT 0,
+            behind_main INTEGER DEFAULT 0,
+            ahead_working INTEGER DEFAULT 0,
+            behind_working INTEGER DEFAULT 0,
+            last_check_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         )
+        """
+    )
 
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_sync_state_status "
@@ -1455,12 +1496,13 @@ def _migrate_proactive_messaging(cursor, conn):
     Users must explicitly opt-in to receive proactive messages from agents.
     Default is 0 (no proactive messages allowed).
     """
-    cursor.execute("PRAGMA table_info(agent_sharing)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "allow_proactive" not in columns:
-        print("Adding allow_proactive column to agent_sharing for proactive messaging consent...")
-        cursor.execute("ALTER TABLE agent_sharing ADD COLUMN allow_proactive INTEGER DEFAULT 0")
+    _safe_add_column(
+        cursor,
+        "agent_sharing",
+        "allow_proactive",
+        "ALTER TABLE agent_sharing ADD COLUMN allow_proactive INTEGER DEFAULT 0",
+        log_msg="Adding allow_proactive column to agent_sharing for proactive messaging consent...",
+    )
 
     # Create index for efficient lookup of proactive-enabled shares
     cursor.execute(
@@ -1630,19 +1672,72 @@ def _migrate_agent_git_config_branch_ownership(cursor, conn):
 
 def _migrate_agent_schedules_webhook(cursor, conn):
     """Add webhook_token and webhook_enabled columns to agent_schedules (WEBHOOK-001, #291)."""
-    cursor.execute("PRAGMA table_info(agent_schedules)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "webhook_token" not in columns:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN webhook_token TEXT")
-    if "webhook_enabled" not in columns:
-        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN webhook_enabled INTEGER DEFAULT 0")
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_token",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_token TEXT",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_enabled",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_enabled INTEGER DEFAULT 0",
+    )
 
     # Partial unique index — only applies to rows where a token is set
     cursor.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_webhook_token "
         "ON agent_schedules(webhook_token) WHERE webhook_token IS NOT NULL"
     )
+    conn.commit()
+
+
+def _migrate_agent_shared_files(cursor, conn):
+    """Create agent_shared_files table and add file_sharing_enabled to agent_ownership.
+
+    FILES-001 / amazing-file-outbound: outbound file sharing via public URL that
+    inherits the agent's channel-access policy. Agents call the `share_file` MCP
+    tool; backend extracts the named file via Docker SDK `get_archive` and mints
+    a token-scoped download URL under /api/files/{id}.
+
+    FK uses ON UPDATE CASCADE so rows self-heal if an agent is renamed
+    (defense-in-depth alongside the explicit UPDATE in
+    db.agent_settings.metadata.rename_agent).
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_shared_files (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mime_type TEXT,
+            download_token TEXT UNIQUE NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            one_time INTEGER DEFAULT 0,
+            consumed_at TEXT,
+            download_count INTEGER DEFAULT 0,
+            last_downloaded_at TEXT,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_agent ON agent_shared_files(agent_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_token ON agent_shared_files(download_token)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL"
+    )
+
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "file_sharing_enabled" not in columns:
+        cursor.execute(
+            "ALTER TABLE agent_ownership ADD COLUMN file_sharing_enabled INTEGER DEFAULT 0"
+        )
 
     conn.commit()
 
@@ -1699,4 +1794,5 @@ MIGRATIONS = [
     ("sync_health", _migrate_sync_health),
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
+    ("agent_shared_files", _migrate_agent_shared_files),
 ]

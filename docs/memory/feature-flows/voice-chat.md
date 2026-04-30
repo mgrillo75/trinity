@@ -1,7 +1,7 @@
 # Voice Chat — Gemini 2.5 Flash Native Audio
 
-**Status**: 🚧 Phase 1 MVP Implemented
-**Date**: 2026-03-23
+**Status**: ✅ Phase 1 + Tool Calling Complete
+**Date**: 2026-04-29
 **Priority**: P1
 
 ---
@@ -14,73 +14,68 @@ Users need a fast, natural way to speak with agents via the browser. Text chat c
 
 ## Core Concept
 
-Use **Gemini 2.5 Flash Native Audio** (`gemini-live-2.5-flash-native-audio`) as a real-time voice proxy for the agent. Claude Code remains the agent's brain (generates the system prompt and handles complex tasks), but the voice conversation runs on Gemini's speech-to-speech model for speed (~280ms TTFT).
+Use **Gemini 2.5 Flash Native Audio** (`gemini-live-2.5-flash-native-audio`) as a real-time voice proxy for the agent. Claude Code remains the agent's brain (handles complex tasks via tool calls), but the voice conversation runs on Gemini's speech-to-speech model for speed (~280ms TTFT). During voice sessions, Gemini can invoke a `run_task` function declaration to delegate work to the underlying Claude agent.
 
 ### Why Not Claude for Voice?
 
 Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeline would require STT → Claude text API (~500-800ms TTFT) → TTS, totaling 800ms-1.3s. Gemini's native audio model handles audio in/out natively with ~280ms latency and built-in turn-taking, barge-in, and emotion.
-
-### Why Gemini 2.5 Flash Native Audio?
-
-- Native speech-to-speech (no STT/TTS pipeline)
-- ~280ms time-to-first-token
-- 30 HD voices, 24 languages
-- Supports custom system prompts
-- Affective dialog (responds to user's tone)
-- Function calling mid-conversation
-- GA on Vertex AI
-- WebSocket-based Live API
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Browser (Agent Detail)                │
-│                                                         │
-│  ┌──────────────┐    ┌───────────────────────────────┐  │
-│  │  Chat Panel  │    │   Voice Overlay / Panel       │  │
-│  │  (existing)  │    │                               │  │
-│  │              │    │  [Waveform / Speaking Status]  │  │
-│  │  ... msgs    │    │  [Mute] [End Call]             │  │
-│  │              │    │                               │  │
-│  └──────────────┘    └──────────┬────────────────────┘  │
-│                                 │                        │
-│                        WebSocket (audio frames)          │
-└─────────────────────────┬───────────────────────────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │   Trinity Backend     │
-              │                       │
-              │  /api/agents/{name}/  │
-              │    voice/start        │
-              │    voice/stop         │
-              │                       │
-              │  WebSocket proxy:     │
-              │  Browser ↔ Gemini     │
-              │  Live API             │
-              │                       │
-              │  On session end:      │
-              │  - Extract transcript │
-              │  - Save to ChatMessage│
-              │  - Update ChatSession │
-              └───────────────────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │  Gemini Live API      │
-              │  (Vertex AI)          │
-              │                       │
-              │  Model:               │
-              │  gemini-live-2.5-     │
-              │  flash-native-audio   │
-              │                       │
-              │  System prompt:       │
-              │  agent personality +  │
-              │  conversation summary │
-              └───────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                     Browser (Agent Detail)                  │
+│                                                            │
+│  ┌──────────────┐    ┌──────────────────────────────────┐  │
+│  │  Chat Panel  │    │  VoiceOverlay.vue (canvas orb)   │  │
+│  │  (existing)  │    │                                  │  │
+│  │              │    │  Canvas orb — value noise + curl │  │
+│  │  ... msgs    │    │  noise particles (220, 3 layers)  │  │
+│  │              │    │  State hues: idle/connecting=0°   │  │
+│  │              │    │  listening=+90° (green)           │  │
+│  │              │    │  speaking=+210° (indigo)          │  │
+│  │              │    │  tool_calling=amber badge overlay │  │
+│  │              │    │  [Mute] [End Call]                │  │
+│  └──────────────┘    └──────────────┬───────────────────┘  │
+│                                     │                       │
+│                    useVoiceSession.js composable            │
+│                    (amplitude polling @ 30ms,               │
+│                     tool_call / tool_result WS handlers)    │
+│                                     │ WebSocket             │
+└─────────────────────────────────────┼───────────────────────┘
+                                      │
+                                      ▼
+                          ┌───────────────────────┐
+                          │   Trinity Backend      │
+                          │                        │
+                          │  routers/voice.py      │
+                          │  POST voice/start      │
+                          │  WS /ws/voice/{id}     │
+                          │                        │
+                          │  services/gemini_voice │
+                          │  VoiceSession          │
+                          │  _execute_and_respond()│
+                          │  (30s timeout)         │
+                          │                        │
+                          │  on_tool_call →        │
+                          │    WS frame + audit log│
+                          │  on_tool_result →      │
+                          │    WS frame            │
+                          └────────────┬───────────┘
+                                       │
+                          ┌────────────┴───────────┐
+                          │                        │
+                          ▼                        ▼
+              ┌───────────────────┐   ┌────────────────────┐
+              │  Gemini Live API  │   │  Agent Container   │
+              │  (Vertex AI)      │   │  (Claude Code)     │
+              │                   │   │                    │
+              │  tools=[          │   │  agent_client      │
+              │   run_task fn     │   │  .task(prompt)     │
+              │  ]                │   │                    │
+              └───────────────────┘   └────────────────────┘
 ```
 
 ---
@@ -91,44 +86,28 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 
 1. User is on Agent Detail page, Chat tab (authenticated)
 2. User clicks **"Talk"** button (microphone icon) next to the chat input
-3. Backend receives `POST /api/agents/{name}/voice/start`
+3. `POST /api/agents/{name}/voice/start` with optional `voice_name`
 4. Backend prepares the voice session:
-   a. Loads the agent's **voice system prompt** (pre-created, stored as agent config)
-   b. Fetches recent chat history for this session
-   c. Summarizes the conversation so far into a concise context block
-   d. Combines: `voice_system_prompt + "\n\n## Conversation so far:\n" + summary`
-5. Backend opens a WebSocket connection to Gemini Live API with the combined prompt
-6. Backend establishes a WebSocket bridge: browser ↔ backend ↔ Gemini
-7. Browser captures microphone audio via `getUserMedia()` and streams to backend
-8. Gemini responds with audio frames streamed back to the browser
-9. Voice overlay appears with speaking indicators
+   a. 3-level system prompt fallback: DB field → container file `voice-agent-system-prompt.md` → auto-generate from template info → generic
+   b. Fetches recent chat history for context injection
+5. Backend opens connection to Gemini Live API with `tools=[_RUN_TASK_TOOL]`
+6. WebSocket bridge established: browser ↔ backend ↔ Gemini
+7. Canvas orb overlay appears; state transitions drive hue rotation
 
 ### During the Voice Session
 
-- User speaks naturally; Gemini responds in real-time
-- Gemini uses the agent's personality from the system prompt
-- Gemini has context of the prior text conversation via the summary
-- User can interrupt (barge-in) at any time
-- Backend accumulates the transcript (Gemini provides text alongside audio)
+- User speaks; Gemini responds in real-time (~280ms TTFT)
+- When Gemini calls `run_task`, backend dispatches `asyncio.create_task(_execute_and_respond())` (30s timeout)
+- `tool_call` WS frame sent → orb shows amber badge; `tool_result` frame sent → orb returns to listening state
+- All tool calls written to platform audit log
+- Backend accumulates transcript from Gemini `serverContent` messages
 
 ### Ending a Voice Session
 
-1. User clicks **"End"** button, or closes the overlay
-2. Backend sends session close to Gemini Live API
-3. Backend extracts the full transcript from the session
-4. Transcript is saved as ChatMessage entries in the existing chat session:
-   - Each user utterance → `ChatMessage(role="user", content=text)`
-   - Each agent response → `ChatMessage(role="assistant", content=text)`
-   - Messages tagged with `source="voice"` for UI differentiation
-5. Chat panel refreshes and shows the voice conversation inline with text messages
-6. User can continue the conversation via text or start another voice session
-
-### Picking Up Context
-
-When starting a new voice session mid-conversation:
-- The summary includes ALL prior messages (both text and previous voice transcripts)
-- This means the voice agent knows what was discussed in text AND in previous voice sessions
-- Seamless continuity between modalities
+1. User clicks **"End"** button or closes overlay
+2. Backend closes Gemini session, cancels any pending `_pending_tool_tasks`
+3. Transcript saved as `ChatMessage` rows in existing `chat_messages` table
+4. Chat panel refreshes showing voice conversation inline with text messages
 
 ---
 
@@ -136,81 +115,108 @@ When starting a new voice session mid-conversation:
 
 ### VOICE-001: Voice Session Initialization
 
-**Status**: 🚧 Phase 1 Implemented
+**Status**: ✅ Implemented
 
 | Requirement | Detail |
 |-------------|--------|
-| Backend endpoint | `POST /api/agents/{name}/voice/start` → returns WebSocket URL |
-| System prompt source | Agent config field: `voice_system_prompt` (pre-created by agent owner) |
-| Context injection | Summarize last N messages of current chat session (truncate to fit Gemini context) |
-| Gemini connection | Open WebSocket to `generativelanguage.googleapis.com` Live API |
-| Authentication | Vertex AI service account or Gemini API key (platform-level config) |
-| Audio format | PCM 16-bit, 16kHz mono (Gemini Live API default) |
+| Backend endpoint | `POST /api/agents/{name}/voice/start` → returns `voice_session_id` + WebSocket URL |
+| System prompt source | 3-level fallback: DB → `voice-agent-system-prompt.md` container file → auto-generate → generic |
+| Context injection | Summarize last N messages of current chat session |
+| Gemini connection | `google-genai` SDK, `generativelanguage.googleapis.com` Live API |
+| Authentication | `GEMINI_API_KEY` platform setting |
+| Audio format | PCM 16-bit, 16kHz mono |
+| Voice name | Passed via `voice_name` field in `VoiceStartRequest` |
 
 ### VOICE-002: Audio Streaming Bridge
 
-**Status**: ⏳ Not Started
+**Status**: ✅ Implemented
 
 | Requirement | Detail |
 |-------------|--------|
 | Browser → Backend | WebSocket carrying raw audio frames from `getUserMedia()` |
-| Backend → Gemini | Forward audio frames to Gemini Live API WebSocket |
+| Backend → Gemini | Forward audio frames to Gemini Live API |
 | Gemini → Backend | Receive audio response frames + transcript text |
-| Backend → Browser | Forward audio frames for playback via `AudioContext` |
-| Latency target | < 100ms added by the proxy layer |
-| Concurrency | One active voice session per user per agent |
+| Backend → Browser | Forward audio frames for playback |
+| Playback engine | AudioWorklet-first (blob URL inlined) with ScriptProcessor fallback |
+| Amplitude | `createAudioPlayer()` exposes `getAmplitude()` (0–1 float) via `AnalyserNode` |
 
 ### VOICE-003: Transcript Persistence
 
-**Status**: ⏳ Not Started
+**Status**: ✅ Implemented
 
 | Requirement | Detail |
 |-------------|--------|
-| Transcript extraction | Capture text from Gemini's `serverContent` messages (text alongside audio) |
-| Storage | Save as `ChatMessage` rows in existing `chat_messages` table |
-| Message metadata | `source` field = `"voice"` to distinguish from text messages |
-| Session linkage | Messages belong to the user's current `ChatSession` |
-| Timing | Save on session end (batch) AND incrementally during session |
-| Cost tracking | Track Gemini API cost per voice session |
+| Transcript extraction | Captured from Gemini `serverContent` messages during session |
+| Storage | Saved as `ChatMessage` rows in `chat_messages` table |
+| Session linkage | Belongs to user's current `ChatSession` |
+| Timing | Saved on session end |
 
 ### VOICE-004: Frontend Voice UI
 
-**Status**: ⏳ Not Started
+**Status**: ✅ Implemented
 
 | Requirement | Detail |
 |-------------|--------|
 | Trigger | Microphone icon button next to chat input textarea |
-| Voice overlay | Appears over/beside chat panel when voice is active |
-| Visual feedback | Waveform or pulsing indicator showing who is speaking |
+| Voice overlay | `VoiceOverlay.vue` — full canvas orb, pure JS (no CDN) |
+| Particle system | Value noise + curl noise, 220 smoke particles in 3 layers, 9 pre-rendered sprite canvases |
+| State hues | idle/connecting: 0°, listening: +90° (green), speaking: +210° (indigo), tool_calling: amber badge |
 | Controls | Mute mic toggle, End call button |
-| Browser API | `navigator.mediaDevices.getUserMedia({ audio: true })` |
-| Audio playback | `AudioContext` + `AudioWorklet` for low-latency playback |
-| Permission | Request mic permission on first click, show clear prompt |
-| Mobile | Must work on mobile browsers (Safari, Chrome) |
+| Amplitude polling | `setInterval(30ms)` via `amplitude` ref in composable |
+| Audio capture | `navigator.mediaDevices.getUserMedia({ audio: true })` |
+| Audio playback | AudioWorklet with ScriptProcessor fallback |
 
 ### VOICE-005: Voice System Prompt
 
-**Status**: ⏳ Not Started
+**Status**: ✅ Implemented
 
 | Requirement | Detail |
 |-------------|--------|
-| Storage | New field on agent: `voice_system_prompt` (text, nullable) |
-| Creation | Agent owner writes it manually OR generates from agent's main CLAUDE.md |
-| Content | Concise personality description, conversation style, voice-specific instructions |
-| Voice-specific rules | E.g., "Keep responses under 2 sentences", "Use casual language", "Don't use markdown" |
-| Fallback | If no voice prompt set, derive a basic one from agent name + description |
+| Lookup order | 1) DB field, 2) `voice-agent-system-prompt.md` in container, 3) auto-generate from template info, 4) generic fallback |
+| Implementation | `_get_voice_system_prompt()` in `routers/voice.py` |
 
 ### VOICE-006: Conversation Summary for Context
 
-**Status**: ⏳ Not Started
+**Status**: ✅ Implemented (truncation approach)
 
 | Requirement | Detail |
 |-------------|--------|
 | Trigger | On voice session start |
-| Input | All ChatMessage rows for current session (text + prior voice transcripts) |
-| Method | Call Claude (fast model, e.g., Haiku) to summarize OR simple truncation of last N messages |
-| Output | Concise summary (< 2000 tokens) injected into Gemini system prompt |
-| Fallback | If no prior messages, just use the voice system prompt alone |
+| Method | Truncation of last N messages injected into system prompt |
+| Fallback | Voice system prompt alone if no prior messages |
+
+### VOICE-007: Tool Calling (run_task)
+
+**Status**: ✅ Implemented (Phase 3 — shipped early)
+
+| Requirement | Detail |
+|-------------|--------|
+| Function declaration | `_RUN_TASK_TOOL` (`FunctionDeclaration` for `run_task`) registered in `LiveConnectConfig` |
+| Execution | `_execute_and_respond()` coroutine, `asyncio.create_task` per call, 30s `wait_for` timeout |
+| Agent call | `agent_client.task(prompt)` (lazy import), truncated to `_TOOL_PROMPT_MAX=2000` chars |
+| Error handling | `AgentNotReachableError` → "not currently running"; `AgentRequestError` → "Task error: ..." |
+| Empty prompt | Falls back to "No prompt" |
+| Session tracking | `_pending_tool_tasks` dict on `VoiceSession`; all cancelled on `end_session()` |
+| WS events | `{type: "tool_call", tool_name: "run_task"}` and `{type: "tool_result", ...}` frames |
+| Audit | Platform audit log written on each tool call via `on_tool_call` callback |
+
+---
+
+## WebSocket Message Types
+
+**Client → Server:**
+```json
+{ "type": "audio", "data": "<base64 PCM audio>" }
+```
+
+**Server → Client:**
+```json
+{ "type": "audio", "data": "<base64 PCM audio>" }
+{ "type": "transcript", "role": "user|assistant", "text": "..." }
+{ "type": "status", "state": "listening|speaking|processing" }
+{ "type": "tool_call", "tool_name": "run_task" }
+{ "type": "tool_result", "tool_name": "run_task", "result": "..." }
+```
 
 ---
 
@@ -221,7 +227,8 @@ When starting a new voice session mid-conversation:
 **Request:**
 ```json
 {
-  "session_id": "optional - existing chat session to continue"
+  "session_id": "optional - existing chat session to continue",
+  "voice_name": "optional - Gemini voice name"
 }
 ```
 
@@ -234,45 +241,7 @@ When starting a new voice session mid-conversation:
 }
 ```
 
-### WebSocket /ws/voice/{voice_session_id}
-
-**Client → Server frames:**
-```json
-{
-  "type": "audio",
-  "data": "<base64 PCM audio>"
-}
-```
-
-**Server → Client frames:**
-```json
-{
-  "type": "audio",
-  "data": "<base64 PCM audio>"
-}
-```
-```json
-{
-  "type": "transcript",
-  "role": "user|assistant",
-  "text": "what the user/agent said"
-}
-```
-```json
-{
-  "type": "status",
-  "state": "listening|speaking|processing"
-}
-```
-
 ### POST /api/agents/{name}/voice/stop
-
-**Request:**
-```json
-{
-  "voice_session_id": "vs_abc123"
-}
-```
 
 **Response:**
 ```json
@@ -288,76 +257,64 @@ When starting a new voice session mid-conversation:
 
 ## Configuration
 
-### Platform-Level (Settings)
+### Platform-Level
 
 | Setting | Description |
 |---------|-------------|
-| `GEMINI_API_KEY` | API key for Gemini Live API (or Vertex AI service account) |
-| `VOICE_ENABLED` | Global toggle to enable/disable voice feature |
+| `GEMINI_API_KEY` | API key for Gemini Live API |
+| `VOICE_ENABLED` | Global toggle |
 | `VOICE_MODEL` | Model ID (default: `gemini-2.5-flash-native-audio-preview-12-2025`) |
-| `VOICE_MAX_DURATION` | Max voice session duration in seconds (default: 300) |
+| `VOICE_MAX_DURATION` | Max session duration in seconds (default: 300) |
 
 ### Per-Agent
 
 | Setting | Description |
 |---------|-------------|
-| `voice_system_prompt` | Agent-specific voice personality prompt |
-| `voice_enabled` | Per-agent toggle (default: true if platform voice is enabled) |
-| `voice_name` | Gemini voice selection (from 30 HD voices) |
+| `voice_system_prompt` | Agent-specific voice personality prompt (DB field) |
+| `voice_enabled` | Per-agent toggle |
+| `voice_name` | Gemini voice selection (passed at session start) |
+
+---
+
+## Key Implementation Files
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler, `_get_voice_system_prompt()`, `on_tool_call`/`on_tool_result` callbacks |
+| **Backend** | `src/backend/services/gemini_voice.py` | `VoiceSession`, `_RUN_TASK_TOOL` declaration, `_execute_tool()`, `_execute_and_respond()`, `_pending_tool_tasks` |
+| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | Canvas orb (value noise + curl noise particles, state hues, amber tool badge) |
+| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | Session state (`toolName`, `amplitude`, `isToolCalling`), WS message handlers, amplitude polling |
+| **Frontend** | `src/frontend/src/utils/audio.js` | AudioWorklet-first capture/playback, `getAmplitude()` via `AnalyserNode` |
+| **Tests** | `tests/unit/test_voice_tools.py` | 12 unit tests: `_execute_tool`, `_execute_and_respond`, tool declaration, session cancellation |
 
 ---
 
 ## Scope & Phasing
 
-### Phase 1: MVP (This Implementation)
+### Phase 1: MVP ✅ Complete
 
 - Authenticated chat only (not public links)
 - Single agent at a time
-- Basic voice overlay UI (no waveform, just status indicators)
-- Transcript saved on session end (not incremental)
-- Manual voice system prompt (agent owner writes it)
+- Voice overlay with canvas orb visualization
+- Transcript saved on session end
+- 3-level voice system prompt fallback
 - Gemini API key in platform settings
+- `voice_name` selection at session start
 
-### Phase 2: Polish
+### Phase 2: Polish (Partial)
 
-- Real-time waveform visualization
-- Incremental transcript display in chat during voice session
-- Auto-generate voice prompt from agent's CLAUDE.md
-- Voice quality/latency metrics
-- Public link voice support
+- ✅ Real-time amplitude visualization (canvas orb driven by `getAmplitude()`)
+- ⏳ Incremental transcript display in chat during session
+- ⏳ Voice quality/latency metrics
+- ⏳ Public link voice support
 
-### Phase 3: Advanced
+### Phase 3: Tool Calling ✅ Complete (shipped with Phase 1)
 
-- Function calling (Gemini calls Trinity MCP tools mid-voice-session)
-- Multi-language voice with auto-detection
-- Voice cloning / custom voice per agent
-- Voice-to-voice agent-to-agent communication
-
----
-
-## Dependencies
-
-| Dependency | Purpose | Status |
-|------------|---------|--------|
-| Gemini API key | Access to Live API | Need to configure |
-| `google-genai` Python SDK | Server-side Gemini Live API client | Need to install |
-| Browser `getUserMedia` | Microphone access | Available in all modern browsers |
-| Browser `AudioContext` | Audio playback | Available in all modern browsers |
-| Existing ChatPanel.vue | Integration point for voice button | ✅ Exists |
-| Existing ChatMessage model | Storage for transcripts | ✅ Exists |
-| Existing ChatSession model | Session tracking | ✅ Exists |
-
----
-
-## Key Implementation Files (Planned)
-
-| Layer | File | Purpose |
-|-------|------|---------|
-| **Backend** | `src/backend/routers/voice.py` | Voice API endpoints + WebSocket handler |
-| **Backend** | `src/backend/services/gemini_voice.py` | Gemini Live API client wrapper |
-| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | Voice session UI overlay |
-| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | Voice session state management |
-| **Frontend** | `src/frontend/src/utils/audio.js` | Audio capture and playback utilities |
+- ✅ `run_task` function calling (Gemini delegates to Claude agent mid-session)
+- ✅ Amber badge UI state during tool execution
+- ✅ 30s timeout with error recovery
+- ⏳ Multi-language voice with auto-detection
+- ⏳ Voice cloning / custom voice per agent
 
 ---
 
@@ -367,4 +324,3 @@ When starting a new voice session mid-conversation:
 - [Persistent Chat Tracking](./persistent-chat-tracking.md) — Message storage
 - [Gemini Runtime](./gemini-runtime.md) — Existing Gemini integration
 - [Gemini Live API Docs](https://ai.google.dev/gemini-api/docs/live-api) — Official API reference
-- [Gemini Live API Capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities) — Audio features

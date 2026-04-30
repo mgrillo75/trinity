@@ -1,5 +1,7 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-04-26 (#428):** Slot acquisition/release now goes through [`CapacityManager`](capacity-management.md) (`acquire(overflow_policy="reject")` + `release()`) rather than calling `SlotService` directly. The `slot_already_held` parameter still applies — routers pre-acquire via `CapacityManager` and pass `slot_already_held=True` so the service's `finally` block remains the single release point.
+
 ## Overview
 Service that encapsulates the task-execution lifecycle (execution record, slot management, activity tracking, agent HTTP call with retry, credential sanitization, response persistence). Used by most — but not all — execution paths.
 
@@ -58,7 +60,7 @@ Callers inspect `result.status` to decide HTTP response. Status values come from
 
 Moved from `routers/chat.py`. Module-level async function. Used by:
 - `TaskExecutionService.execute_task()` internally (line 249)
-- `routers/chat.py` for `/chat` endpoint (line 248) and `_execute_task_background` (line 477)
+- `routers/chat.py` for `/chat` endpoint and `_run_async_task_with_persistence` (the async-mode wrapper introduced by #95; previously named `_execute_task_background`)
 
 ```python
 async def agent_post_with_retry(
@@ -138,6 +140,7 @@ async def execute_task(
     parent_activity_id: Optional[str] = None,       # Issue #95: CHAT_START parent linkage
     extra_activity_details: Optional[dict] = None,  # Issue #95: merged into CHAT_START details
     slot_already_held: bool = False,                # Issue #95: async path pre-acquires slot upfront
+    images: Optional[list] = None,                  # #562: vision content blocks for channel images
 ) -> TaskExecutionResult:
 ```
 
@@ -163,7 +166,7 @@ The endpoint handles:
 2. Determine `triggered_by` from headers (lines 686-691)
 3. Create execution record early (lines 694-705) -- passed to service as `execution_id`
 4. Collaboration tracking for agent-to-agent (lines 710-732) -- stays in router
-5. **Async mode branch** (lines 735-808) -- spawns `_execute_task_background()`, does NOT use service
+5. **Async mode branch** -- pre-acquires capacity slot, then spawns `_run_async_task_with_persistence()` which delegates to `task_execution_service.execute_task(slot_already_held=True)` (post-#95)
 6. **Sync mode branch** (lines 810-827) -- delegates to `task_execution_service.execute_task()`
 7. Collaboration activity completion (lines 830-839)
 8. Error translation to HTTP exceptions (lines 842-857)

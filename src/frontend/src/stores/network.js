@@ -272,7 +272,13 @@ export const useNetworkStore = defineStore('network', () => {
               activity_type: activity.activity_type,
               triggered_by: activity.triggered_by,
               schedule_name: details.schedule_name || null,
-              error: activity.error
+              error: activity.error,
+              // #514: previews surfaced on timeline hover. Backend stores
+              // first 100 chars of command in details.message_preview at
+              // activity start; first 200 chars of sanitized response in
+              // details.response_preview on completion.
+              command_preview: details.message_preview || '',
+              response_preview: details.response_preview || ''
             }
           } catch (e) {
             console.warn('Failed to parse activity details:', e)
@@ -535,7 +541,7 @@ export const useNetworkStore = defineStore('network', () => {
     nodes.value = result
   }
 
-  function connectWebSocket() {
+  async function connectWebSocket() {
     // Reset intentional disconnect flag when intentionally connecting
     intentionalDisconnect.value = false
 
@@ -545,15 +551,25 @@ export const useNetworkStore = defineStore('network', () => {
       return
     }
 
-    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
-    if (lastEventId.value) {
-      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
-    }
-
     // Prevent duplicate connections
     if (websocket.value?.readyState === WebSocket.OPEN) {
       console.log('[Collaboration] WebSocket already connected')
       return
+    }
+
+    // #550: mint single-use ticket; JWT never enters the WebSocket URL.
+    let ticket
+    try {
+      const { data } = await axios.post('/api/ws/ticket')
+      ticket = data.ticket
+    } catch (err) {
+      console.error('[Collaboration] failed to mint WS ticket', err)
+      return
+    }
+
+    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
+    if (lastEventId.value) {
+      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
     }
 
     try {

@@ -181,6 +181,69 @@
       "added": "2026-04-21",
       "categories": ["backend", "unit", "websocket", "redis-streams"],
       "description": "Unit tests for Redis Streams event bus (#306): last-event-id validation + id comparison, scope visibility (SCOPE_ALL vs SCOPE_SCOPED with accessible_agents), EventBus XADD envelope (dict + legacy JSON string + inferred agent_name), Redis-unavailable fallback buffer, StreamDispatcher 3-failure client eviction, slow-consumer queue overflow triggers resync marker, update_accessible_agents mutation, invalid last-event-id queues resync_required"
+    },
+    {
+      "file": "unit/test_agent_shared_files_migration.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 1",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "schema", "migrations", "file-sharing"],
+      "description": "Schema + migration tests for agent_shared_files: table creation on legacy DB, expected columns, file_sharing_enabled added to agent_ownership (default 0), FK carries both ON DELETE CASCADE and ON UPDATE CASCADE, 3 indexes including the partial 'WHERE revoked_at IS NULL', migration idempotent on legacy and fresh DBs, ON UPDATE CASCADE propagates rename, ON DELETE CASCADE removes children, download_token UNIQUE constraint enforced (12 tests)"
+    },
+    {
+      "file": "unit/test_file_sharing_mixin.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 2",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "db", "file-sharing"],
+      "description": "FileSharingMixin DB operations: get_file_sharing_enabled default False (missing row, NULL column, 0 column), set/get round-trip (True, False, idempotent repeat), set returns False on unknown agent (rowcount=0), per-agent isolation, static volume-name convention ('agent-{name}-public'), static mount-path constant '/home/developer/public' (12 tests)"
+    },
+    {
+      "file": "unit/test_public_folder_mount_match.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 2",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "lifecycle", "file-sharing"],
+      "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
+    },
+    {
+      "file": "unit/test_slack_dm_default.py",
+      "feature": "Slack DM-default agent setter (#584)",
+      "added": "2026-04-29",
+      "categories": ["backend", "unit", "db", "slack"],
+      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote — router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
+    },
+    {
+      "file": "test_public_chat_history.py",
+      "feature": "Issue #587",
+      "added": "2026-04-29",
+      "categories": ["backend", "api", "public", "chat"],
+      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} — auth requirements, 404 on invalid tokens, response shape, limit param"
+    },
+    {
+      "file": "unit/test_voice_tools.py",
+      "feature": "VOICE-001 / Issue #581",
+      "added": "2026-04-29",
+      "categories": ["backend", "unit", "voice", "gemini", "tools"],
+      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
+    },
+    {
+      "file": "test_files_guardrail_bypass.py",
+      "feature": "Issue #590 / AISEC-C2",
+      "added": "2026-04-30",
+      "categories": ["backend", "api", "security", "files", "credentials"],
+      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
+    },
+    {
+      "file": "test_mcp_validator_endpoint.py",
+      "feature": "Issue #598 / AISEC-C2 Layer 2",
+      "added": "2026-04-30",
+      "categories": ["backend", "api", "security", "credentials", "mcp"],
+      "description": "Integration tests for .mcp.json content validation at the inject endpoint: AISEC-C2 still blocked (now via content validator), legit configs accepted (npx, uvx, Bearer ${TOKEN} headers, empty mcpServers), 11 parametrized bypass attempts (path-disguised commands, inline-exec flags, shell metachars, command substitution, reserved env refs, SSRF localhost/IMDS, http-not-https, userinfo URLs, reserved trinity name, unknown fields), .mcp.json.template still blocked at path layer, mixed-batch atomicity (.env + evil .mcp.json rejects whole batch). Pairs with tests/unit/test_mcp_validator.py (88 unit tests)."
+    },
+    {
+      "file": "unit/test_web_file_upload.py",
+      "feature": "Issue #364",
+      "added": "2026-04-29",
+      "categories": ["backend", "unit", "upload", "files", "chat"],
+      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) — 14 tests"
     }
   ]
 }

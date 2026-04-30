@@ -17,9 +17,9 @@
             <!-- Service status -->
             <span
               class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium"
-              :class="monitoringStore.enabled ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'"
+              :class="monitoringStore.enabled ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'"
             >
-              <span class="w-2 h-2 rounded-full mr-2" :class="monitoringStore.enabled ? 'bg-green-500' : 'bg-gray-400'"></span>
+              <span class="w-2 h-2 rounded-full mr-2" :class="monitoringStore.enabled ? 'bg-status-success-500' : 'bg-gray-400'"></span>
               {{ monitoringStore.enabled ? 'Monitoring Active' : 'Monitoring Disabled' }}
             </span>
 
@@ -64,28 +64,28 @@
             <div class="text-3xl font-bold text-gray-900 dark:text-white">{{ monitoringStore.summary.total_agents }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">Total Agents</div>
           </div>
-          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-green-500">
-            <div class="text-3xl font-bold text-green-600 dark:text-green-400">{{ monitoringStore.summary.healthy }}</div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-success-500">
+            <div class="text-3xl font-bold text-status-success-600 dark:text-status-success-400">{{ monitoringStore.summary.healthy }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">Healthy</div>
           </div>
-          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-yellow-500">
-            <div class="text-3xl font-bold text-yellow-600 dark:text-yellow-400">{{ monitoringStore.summary.degraded }}</div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-warning-500">
+            <div class="text-3xl font-bold text-status-warning-600 dark:text-status-warning-400">{{ monitoringStore.summary.degraded }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">Degraded</div>
           </div>
-          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-red-500">
-            <div class="text-3xl font-bold text-red-600 dark:text-red-400">{{ monitoringStore.summary.unhealthy }}</div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-danger-500">
+            <div class="text-3xl font-bold text-status-danger-600 dark:text-status-danger-400">{{ monitoringStore.summary.unhealthy }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">Unhealthy</div>
           </div>
-          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-red-700">
-            <div class="text-3xl font-bold text-red-700 dark:text-red-500">{{ monitoringStore.summary.critical }}</div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-danger-700">
+            <div class="text-3xl font-bold text-status-danger-700 dark:text-status-danger-500">{{ monitoringStore.summary.critical }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">Critical</div>
           </div>
         </div>
 
         <!-- Active Alerts -->
-        <div v-if="monitoringStore.hasActiveAlerts" class="bg-red-50 dark:bg-red-900/20 rounded-lg shadow mb-6 p-4">
+        <div v-if="monitoringStore.hasActiveAlerts" class="bg-status-danger-50 dark:bg-status-danger-900/20 rounded-lg shadow mb-6 p-4">
           <div class="flex items-center justify-between mb-3">
-            <h2 class="text-lg font-medium text-red-800 dark:text-red-200 flex items-center">
+            <h2 class="text-lg font-medium text-status-danger-800 dark:text-status-danger-200 flex items-center">
               <BellAlertIcon class="w-5 h-5 mr-2" />
               Active Alerts ({{ monitoringStore.alerts.length }})
             </h2>
@@ -99,7 +99,7 @@
               <div class="flex items-center gap-3">
                 <ExclamationTriangleIcon
                   class="w-5 h-5"
-                  :class="alert.priority === 'urgent' ? 'text-red-600' : 'text-yellow-600'"
+                  :class="alert.priority === 'urgent' ? 'text-status-danger-600' : 'text-status-warning-600'"
                 />
                 <div>
                   <span class="font-medium text-gray-900 dark:text-white">{{ alert.agent_name }}</span>
@@ -175,7 +175,7 @@
                 <div class="flex items-center gap-4">
                   <!-- Issues list -->
                   <div v-if="agent.issues && agent.issues.length > 0" class="text-right">
-                    <div class="text-sm text-red-600 dark:text-red-400">
+                    <div class="text-sm text-status-danger-600 dark:text-status-danger-400">
                       {{ agent.issues.length }} issue{{ agent.issues.length > 1 ? 's' : '' }}
                     </div>
                     <div class="text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">
@@ -373,30 +373,30 @@ function getStatusIcon(status) {
 
 function getStatusBgClass(status) {
   switch (status) {
-    case 'healthy': return 'bg-green-100 dark:bg-green-900/30'
-    case 'degraded': return 'bg-yellow-100 dark:bg-yellow-900/30'
-    case 'unhealthy': return 'bg-red-100 dark:bg-red-900/30'
-    case 'critical': return 'bg-red-200 dark:bg-red-900/50'
+    case 'healthy': return 'bg-status-success-100 dark:bg-status-success-900/30'
+    case 'degraded': return 'bg-status-warning-100 dark:bg-status-warning-900/30'
+    case 'unhealthy': return 'bg-status-danger-100 dark:bg-status-danger-900/30'
+    case 'critical': return 'bg-status-danger-200 dark:bg-status-danger-900/50'
     default: return 'bg-gray-100 dark:bg-gray-700'
   }
 }
 
 function getStatusTextClass(status) {
   switch (status) {
-    case 'healthy': return 'text-green-600 dark:text-green-400'
-    case 'degraded': return 'text-yellow-600 dark:text-yellow-400'
-    case 'unhealthy': return 'text-red-600 dark:text-red-400'
-    case 'critical': return 'text-red-700 dark:text-red-500'
+    case 'healthy': return 'text-status-success-600 dark:text-status-success-400'
+    case 'degraded': return 'text-status-warning-600 dark:text-status-warning-400'
+    case 'unhealthy': return 'text-status-danger-600 dark:text-status-danger-400'
+    case 'critical': return 'text-status-danger-700 dark:text-status-danger-500'
     default: return 'text-gray-500 dark:text-gray-400'
   }
 }
 
 function getStatusBadgeClass(status) {
   switch (status) {
-    case 'healthy': return 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
-    case 'degraded': return 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300'
-    case 'unhealthy': return 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
-    case 'critical': return 'bg-red-200 dark:bg-red-900/50 text-red-800 dark:text-red-200'
+    case 'healthy': return 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300'
+    case 'degraded': return 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300'
+    case 'unhealthy': return 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+    case 'critical': return 'bg-status-danger-200 dark:bg-status-danger-900/50 text-status-danger-800 dark:text-status-danger-200'
     default: return 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
   }
 }

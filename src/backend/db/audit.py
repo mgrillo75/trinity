@@ -253,6 +253,39 @@ class PlatformAuditOperations:
             }
 
     # ---------------------------------------------------------------------
+    # Retention
+    # ---------------------------------------------------------------------
+
+    def prune_audit_log(self, retention_days: int) -> int:
+        """Delete entries older than ``retention_days``. Returns rows removed.
+
+        The append-only trigger ``audit_log_no_delete`` blocks DELETEs of
+        rows whose ``timestamp > datetime('now', '-365 days')``. Callers
+        must not pass ``retention_days < 365`` — the trigger would raise
+        on every candidate row and the bulk DELETE would abort.
+
+        Note (architectural invariant #16): we intentionally use SQLite's
+        ``datetime('now', ?)`` here — not ``iso_cutoff()`` — so the prune
+        WHERE filter and the trigger's WHEN clause apply the *same*
+        format-mismatched comparison. Aligning with the trigger avoids
+        IntegrityError on the day-of-cutoff boundary. Fixing the trigger
+        to use ISO-Z form is tracked separately.
+        """
+        if retention_days < 365:
+            raise ValueError(
+                "retention_days must be >= 365 (audit_log_no_delete trigger floor)"
+            )
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM audit_log WHERE timestamp < datetime('now', ?)",
+                (f"-{int(retention_days)} days",),
+            )
+            removed = cursor.rowcount
+            conn.commit()
+            return int(removed)
+
+    # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
 

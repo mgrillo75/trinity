@@ -17,6 +17,144 @@ Configuration:
 # Skip test files that require backend context (can't be run from test suite)
 collect_ignore = ["test_archive_security.py"]
 
+# ---------------------------------------------------------------------------
+# Pre-load src/backend/models as the canonical `models` in sys.modules
+# BEFORE any test file is collected.
+#
+# Problem: test_inter_agent_timeout_unit.py does
+#   sys.modules.setdefault("models", _fake_models)
+# at module-import time (before fixtures run) so that it can import
+# routers/fan_out.py without a full backend environment. In a combined run,
+# `test_inter_agent_timeout_unit.py` is collected alphabetically before
+# `test_self_execute.py`, `test_validation.py`, and `test_watchdog_unit.py`
+# (which do `from models import TaskExecutionStatus` etc.). Because `models`
+# is not in sys.modules yet, the fake stub gets installed permanently and
+# the real backend models never loads → ImportError for missing symbols.
+#
+# Fix: pre-register utils.helpers (backend) and models.py here before any
+# test file runs its top-level code. setdefault in that unit test then
+# becomes a benign no-op.
+#
+# Constraint: this conftest also does `from utils.api_client import ...`
+# which needs tests/utils/api_client.py (NOT src/backend/utils/). We must
+# NOT replace the `utils` package entry — only install `utils.helpers` as
+# a submodule while leaving `utils` itself pointing to tests/utils/.
+#
+# Also pre-register `routers` as a proper namespace package pointing to
+# src/backend/routers/. test_inter_agent_timeout_unit.py has:
+#   if "routers" not in sys.modules:
+#       sys.modules["routers"] = types.ModuleType("routers")  # plain module!
+# at module-import time. If we pre-register with __path__, the guard fires
+# and the plain-module stub is never installed. Otherwise, test_ip_rate_limit_fix.py
+# (collected later) finds `routers` already registered as a plain module
+# (no __path__) and `import routers.public` fails with "routers is not a package".
+# ---------------------------------------------------------------------------
+import importlib.util
+import sys
+import types
+from pathlib import Path as _Path
+
+_TESTS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _TESTS_DIR.parent
+_BACKEND = _PROJECT_ROOT / "src" / "backend"
+_BACKEND_STR = str(_BACKEND)
+
+
+def _preload_backend_helpers_submodule():
+    """Pre-register src/backend/utils/helpers.py as `utils.helpers`.
+
+    Does NOT change `sys.modules["utils"]` — conftest.py needs that to
+    point to tests/utils/ (for api_client, cleanup, etc.). We only
+    install the helpers submodule so that `from utils.helpers import X`
+    inside models.py resolves to the backend version.
+    """
+    existing = sys.modules.get("utils.helpers")
+    if existing is not None:
+        existing_file = getattr(existing, "__file__", None)
+        if existing_file and _BACKEND_STR in str(existing_file):
+            return  # already correct
+
+    helpers_path = _BACKEND / "utils" / "helpers.py"
+    if not helpers_path.exists():
+        return
+
+    spec = importlib.util.spec_from_file_location(
+        "utils.helpers", str(helpers_path)
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["utils.helpers"] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+
+def _preload_backend_models():
+    """Load src/backend/models.py as the canonical `models` module."""
+    existing = sys.modules.get("models")
+    if existing is not None:
+        existing_file = getattr(existing, "__file__", None)
+        if existing_file and _BACKEND_STR in str(existing_file):
+            if hasattr(existing, "ActivityType"):
+                return  # already complete and correct
+        # Evict the wrong / partial entry.
+        del sys.modules["models"]
+
+    models_path = _BACKEND / "models.py"
+    if not models_path.exists():
+        return
+
+    # utils.helpers must be resolvable before models.py is exec'd.
+    _preload_backend_helpers_submodule()
+
+    # Backend path needed for any other transitive imports inside models.py.
+    if _BACKEND_STR not in sys.path:
+        sys.path.insert(0, _BACKEND_STR)
+
+    spec = importlib.util.spec_from_file_location("models", str(models_path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["models"] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    assert hasattr(module, "ActivityType"), (
+        "models.py loaded but ActivityType is missing — check for import errors"
+    )
+
+
+def _preload_backend_routers_namespace():
+    """Pre-register src/backend/routers/ as the `routers` namespace package.
+
+    test_inter_agent_timeout_unit.py runs at collection time and does:
+        if "routers" not in sys.modules:
+            sys.modules["routers"] = types.ModuleType("routers")  # plain module!
+    A plain module has no __path__, so `import routers.public` later in
+    test_ip_rate_limit_fix.py fails with "routers is not a package".
+
+    Pre-registering a proper namespace package here causes the
+    `if "routers" not in sys.modules:` guard to fire and prevents the
+    plain-module stub from being installed.
+    """
+    routers_dir = _BACKEND / "routers"
+    if not routers_dir.exists():
+        return
+
+    existing = sys.modules.get("routers")
+    if existing is not None:
+        # Upgrade to a package if it's currently a plain module.
+        if not getattr(existing, "__path__", None):
+            existing.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+            existing.__package__ = "routers"
+        return
+
+    pkg = types.ModuleType("routers")
+    pkg.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+    pkg.__package__ = "routers"
+    sys.modules["routers"] = pkg
+
+
+_preload_backend_models()
+_preload_backend_routers_namespace()
+
+# ---------------------------------------------------------------------------
+# End of early-init block
+# ---------------------------------------------------------------------------
+
 import os
 import pytest
 import uuid

@@ -197,6 +197,37 @@ class SlackChannelOperations:
             row = cursor.fetchone()
         return row[0] if row else None
 
+    def set_dm_default(self, team_id: str, agent_name: str) -> bool:
+        """Make ``agent_name`` the DM-default for the workspace.
+
+        Single transaction: clear all existing flags, then set on the target.
+        Avoids any window where two agents would both look like the default
+        (the schema has no exclusivity constraint, so the read-side falls
+        back to ``LIMIT 1`` and would pick non-deterministically).
+
+        Returns True if the target row was updated, False if the agent is
+        not bound in this workspace (caller should 404).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            try:
+                cursor.execute(
+                    "UPDATE slack_channel_agents SET is_dm_default = 0 WHERE team_id = ?",
+                    (team_id,),
+                )
+                cursor.execute(
+                    """UPDATE slack_channel_agents SET is_dm_default = 1
+                         WHERE team_id = ? AND agent_name = ?""",
+                    (team_id, agent_name),
+                )
+                changed = cursor.rowcount > 0
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return changed
+
     def get_agents_for_workspace(self, team_id: str) -> List[dict]:
         """Get all agent-channel bindings for a workspace."""
         with get_db_connection() as conn:
@@ -229,7 +260,14 @@ class SlackChannelOperations:
         return self._row_to_channel_agent(row)
 
     def unbind_agent(self, team_id: str, agent_name: str) -> bool:
-        """Remove an agent's channel binding."""
+        """Remove an agent's channel binding.
+
+        Pure delete — does not auto-promote a new DM default. The router
+        layer is responsible for refusing to unbind the current DM default
+        while other agents are still bound (#584). When the unbind target
+        is the only agent in the workspace, the binding is removed cleanly
+        and the workspace ends up with no Slack agents at all.
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""

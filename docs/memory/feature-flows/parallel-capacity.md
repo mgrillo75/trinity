@@ -1,9 +1,11 @@
 # Feature Flow: Parallel Execution Capacity
 
+> **⚠️ INTERNAL AS OF 2026-04-26 (#428):** `SlotService` is no longer a public capacity API. It is now a private internal of [`CapacityManager`](capacity-management.md), which is the single facade callers should use. The Redis ZSET (`agent:slots:{name}`), per-agent dynamic TTL, and atomic ZADD-with-count semantics described below are unchanged — they are the implementation backing `CapacityManager.acquire/release/reclaim_stale`. New callers should reach for [`capacity-management.md`](capacity-management.md) instead of importing `SlotService` directly.
+>
 > **Requirement**: CAPACITY-001 - Per-Agent Parallel Execution Capacity
 > **Status**: Implemented (Phase 1: Backend, Phase 2: Frontend UI)
 > **Created**: 2026-02-28
-> **Updated**: 2026-03-04
+> **Updated**: 2026-04-26 (#428: SlotService internalized behind CapacityManager)
 > **Priority**: P1
 
 ## Revision History
@@ -61,8 +63,8 @@ The frontend displays slot usage as a vertical capacity meter bar on the Agents 
 │  │  1. Create execution record in database (chat.py:602-613)       │     │
 │  │  2. Router acquires slot directly (chat.py:644-651)             │     │
 │  │  3. If full → 429 response (chat.py:653-663)                   │     │
-│  │  4. Spawn _run_async_task_with_persistence() with release_slot=True     │     │
-│  │  5. Background task releases slot in finally (chat.py:554-557)  │     │
+│  │  4. Spawn _run_async_task_with_persistence() (router pre-acquired)│    │
+│  │  5. TaskExecutionService releases slot in finally (slot_already_held=True)│
 │  │                                                                  │     │
 │  │  PUBLIC path (public.py:315-322 → task_execution_service.py):   │     │
 │  │  1. Delegate to TaskExecutionService.execute_task()              │     │
@@ -137,7 +139,7 @@ POST /api/agents/{name}/task  (async)
   │ 1. db.get_max_parallel_tasks(name)              │
   │ 2. slot_service.acquire_slot(...)               │
   │ 3. If not acquired → 429 Too Many Requests     │
-  │ 4. Spawn background task with release_slot=True │
+  │ 4. Spawn `_run_async_task_with_persistence()`   │
   └─────────────────────────────────────────────────┘
 ```
 

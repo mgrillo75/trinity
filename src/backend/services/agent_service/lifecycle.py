@@ -26,6 +26,7 @@ from services.agent_service.helpers import validate_base_image
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches
+from .file_sharing import check_public_folder_mount_matches
 from .read_only import inject_read_only_hooks
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,7 @@ async def start_agent_internal(agent_name: str) -> dict:
     shared_folder_match = await check_shared_folder_mounts_match(container, agent_name)
     needs_recreation = (
         not shared_folder_match or
+        not check_public_folder_mount_matches(container, agent_name) or
         not check_api_key_env_matches(container, agent_name) or
         not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
@@ -419,6 +421,9 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         # Skip shared folder mounts - we'll add the correct ones
         if dest == "/home/developer/shared-out" or dest.startswith("/home/developer/shared-in/"):
             continue
+        # Skip public mount — re-added below based on current file_sharing_enabled flag.
+        if dest == db.get_public_mount_path():
+            continue
         # Keep other mounts
         if m.get("Type") == "bind":
             volumes[m.get("Source")] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
@@ -469,6 +474,36 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
                     volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
                 except docker.errors.NotFound:
                     pass
+
+    # Add public folder mount based on current file_sharing_enabled flag
+    # (FILES-001 Step 2). Mirrors the shared-folders expose pattern.
+    if db.get_file_sharing_enabled(agent_name):
+        public_volume_name = db.get_public_volume_name(agent_name)
+        public_volume_created = False
+        try:
+            await volume_get(public_volume_name)
+        except docker.errors.NotFound:
+            await volume_create(
+                name=public_volume_name,
+                labels={
+                    'trinity.platform': 'agent-public',
+                    'trinity.agent-name': agent_name,
+                },
+            )
+            public_volume_created = True
+
+        if public_volume_created:
+            try:
+                await containers_run(
+                    'alpine',
+                    command='chown 1000:1000 /public',
+                    volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
+                    remove=True,
+                )
+            except Exception as e:
+                logger.warning(f"Could not fix public volume ownership: {e}")
+
+        volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
 
     # Create new container with security settings
     # Security principle: ALWAYS apply baseline security, even in full_capabilities mode

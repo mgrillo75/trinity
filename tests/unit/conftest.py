@@ -5,6 +5,7 @@ These tests run without a backend connection (no Docker, no API).
 """
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ import pytest
 # backend code. After that, `from utils.helpers import ...` and
 # `from utils.api_client import ...` both hit the right place (backend's
 # `utils` has `helpers.py`; tests' `utils` has `api_client.py`). Because
-# we register under the module name `utils`, test helpers must be imported
+# we register under the name `utils`, test helpers must be imported
 # via `from utils import api_client` — the existing helpers use absolute
 # `from utils.api_client import TrinityApiClient` which still resolves via
 # sys.path lookup on attribute access. To avoid breakage we also install
@@ -32,6 +33,14 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
 if _BACKEND_STR not in sys.path:
     sys.path.insert(0, _BACKEND_STR)
+
+_AGENT_SERVER_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "docker" / "base-image" / "agent_server"
+)
+_BASE_IMAGE_DIR = _AGENT_SERVER_DIR.parent
+_BASE_IMAGE_STR = str(_BASE_IMAGE_DIR)
+if _BASE_IMAGE_STR not in sys.path:
+    sys.path.insert(0, _BASE_IMAGE_STR)
 
 
 def _preload_backend_utils():
@@ -59,12 +68,55 @@ def _preload_backend_utils():
     module.helpers = helpers_mod  # type: ignore[attr-defined]
 
 
+def _preload_real_agent_server():
+    """Install docker/base-image/agent_server as the canonical `agent_server`
+    package for unit tests.
+
+    When running the full test suite, pytest collects tests/agent_server/ first
+    and registers it as the `agent_server` package in sys.modules (pointing to
+    the tests helper package, not the base-image implementation). Unit tests
+    that do `from agent_server.models import ExecutionMetadata` then fail with
+    ModuleNotFoundError because tests/agent_server/ has no models.py.
+
+    Fix: evict any stale tests/agent_server registration and replace it with a
+    namespace-package shim whose __path__ points to docker/base-image/agent_server.
+    This matches the shim each individual unit test file already installs via
+    `if "agent_server" not in sys.modules` — we just do it earlier so the guard
+    fires correctly even when the tests/agent_server package was pre-loaded.
+    """
+    if not _AGENT_SERVER_DIR.exists():
+        return
+
+    # Evict any previously-registered agent_server (and submodules) that point
+    # to tests/agent_server/ rather than docker/base-image/agent_server/.
+    for _mod in list(sys.modules):
+        if _mod == "agent_server" or _mod.startswith("agent_server."):
+            existing = sys.modules[_mod]
+            existing_path = getattr(existing, "__path__", None)
+            if existing_path and not any(
+                str(_AGENT_SERVER_DIR) in p for p in existing_path
+            ):
+                sys.modules.pop(_mod, None)
+
+    # Register the real agent_server as a namespace package so that
+    # `from agent_server.models import X` resolves via __path__ (the file
+    # system), without executing agent_server/__init__.py (which boots FastAPI).
+    if "agent_server" not in sys.modules:
+        _stub = types.ModuleType("agent_server")
+        _stub.__path__ = [str(_AGENT_SERVER_DIR)]  # type: ignore[attr-defined]
+        _stub.__package__ = "agent_server"
+        sys.modules["agent_server"] = _stub
+
+
 # Evict any shadow `utils` that parent conftest already cached, then preload
 # backend's utils package.
 for _mod in list(sys.modules):
     if _mod == "utils" or _mod.startswith("utils."):
         sys.modules.pop(_mod, None)
 _preload_backend_utils()
+
+# Evict any tests/agent_server shadow and register the real base-image package.
+_preload_real_agent_server()
 
 
 @pytest.fixture(autouse=True)

@@ -111,6 +111,7 @@ from db.chat import ChatOperations
 from db.activities import ActivityOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
+from db.agent_shared_files import AgentSharedFilesOperations
 from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
@@ -265,6 +266,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
+        self._agent_shared_files_ops = AgentSharedFilesOperations()
         self._settings_ops = SettingsOperations()
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
@@ -431,6 +433,56 @@ class DatabaseManager:
 
     def get_all_agents_autonomy_status(self):
         return self._agent_ops.get_all_agents_autonomy_status()
+
+    # =========================================================================
+    # Agent File Sharing (outbound — FILES-001)
+    # =========================================================================
+
+    def get_file_sharing_enabled(self, agent_name: str):
+        return self._agent_ops.get_file_sharing_enabled(agent_name)
+
+    def set_file_sharing_enabled(self, agent_name: str, enabled: bool):
+        return self._agent_ops.set_file_sharing_enabled(agent_name, enabled)
+
+    def get_public_volume_name(self, agent_name: str):
+        return self._agent_ops.get_public_volume_name(agent_name)
+
+    def get_public_mount_path(self):
+        return self._agent_ops.get_public_mount_path()
+
+    # =========================================================================
+    # Agent Shared Files (outbound file URLs — FILES-001 Step 3)
+    # =========================================================================
+
+    def create_agent_shared_file(self, **kwargs):
+        return self._agent_shared_files_ops.create(**kwargs)
+
+    def get_agent_shared_file(self, file_id: str):
+        return self._agent_shared_files_ops.get_by_id(file_id)
+
+    def get_agent_shared_file_by_token(self, download_token: str):
+        return self._agent_shared_files_ops.get_by_token(download_token)
+
+    def total_shared_file_bytes_for_agent(self, agent_name: str) -> int:
+        return self._agent_shared_files_ops.total_bytes_for_agent(agent_name)
+
+    def list_active_shared_files_for_agent(self, agent_name: str) -> list:
+        return self._agent_shared_files_ops.list_active_for_agent(agent_name)
+
+    def mark_shared_file_downloaded(self, file_id: str) -> None:
+        return self._agent_shared_files_ops.mark_downloaded(file_id)
+
+    def revoke_agent_shared_file(self, file_id: str) -> bool:
+        return self._agent_shared_files_ops.revoke(file_id)
+
+    def validate_agent_session(self, agent_name: str, session_token: str):
+        return self._public_link_ops.validate_agent_session(agent_name, session_token)
+
+    def delete_shared_files_for_agent(self, agent_name: str) -> list:
+        return self._agent_shared_files_ops.delete_for_agent(agent_name)
+
+    def delete_expired_and_revoked_shared_files(self, revoke_grace_hours: int = 24) -> list:
+        return self._agent_shared_files_ops.delete_expired_and_revoked(revoke_grace_hours=revoke_grace_hours)
 
     # =========================================================================
     # Batch Metadata Query (N+1 Fix) - delegated to db/agents.py
@@ -1484,6 +1536,9 @@ class DatabaseManager:
     def get_slack_dm_default_agent(self, team_id):
         return self._slack_channel_ops.get_dm_default_agent(team_id)
 
+    def set_slack_dm_default(self, team_id, agent_name):
+        return self._slack_channel_ops.set_dm_default(team_id, agent_name)
+
     def get_slack_agents_for_workspace(self, team_id):
         return self._slack_channel_ops.get_agents_for_workspace(team_id)
 
@@ -1780,6 +1835,10 @@ class DatabaseManager:
     def get_audit_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate counts by event_type and actor_type for the dashboard."""
         return self._audit_ops.get_audit_stats(start_time=start_time, end_time=end_time)
+
+    def prune_audit_log(self, retention_days: int) -> int:
+        """Delete audit_log entries older than ``retention_days``. Returns count removed."""
+        return self._audit_ops.prune_audit_log(retention_days)
 
 
 # Global database manager instance

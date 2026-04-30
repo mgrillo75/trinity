@@ -1,16 +1,16 @@
 """
 Agent Service Queue - Execution queue operations.
 
-Handles agent execution queue management.
+Handles agent execution queue management. Funnels all capacity operations
+through the unified CapacityManager (#428).
 """
 import logging
 
 from fastapi import HTTPException
 
 from models import User
+from services.capacity_manager import get_capacity_manager
 from services.docker_service import get_agent_container
-from services.execution_queue import get_execution_queue
-from services.slot_service import get_slot_service
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,10 @@ async def get_agent_queue_status_logic(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     try:
-        queue = get_execution_queue()
-        status = await queue.get_status(agent_name)
+        capacity = get_capacity_manager()
+        # /chat path is serial (max_concurrent=1); status endpoint historically
+        # reflected /chat queue state.
+        status = await capacity.get_status(agent_name, max_concurrent=1)
         return status.model_dump()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get queue status: {str(e)}")
@@ -60,8 +62,8 @@ async def clear_agent_queue_logic(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     try:
-        queue = get_execution_queue()
-        cleared_count = await queue.clear_queue(agent_name)
+        capacity = get_capacity_manager()
+        cleared_count = await capacity.clear_in_memory_queue(agent_name)
 
         return {
             "status": "cleared",
@@ -90,22 +92,14 @@ async def force_release_agent_logic(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     try:
-        queue = get_execution_queue()
-        was_running = await queue.force_release(agent_name)
-
-        # Issue #98: Also clear all capacity slots since we're force-releasing
-        slots_cleared = 0
-        try:
-            slot_service = get_slot_service()
-            slots_cleared = await slot_service.force_clear_slots(agent_name)
-        except Exception as e:
-            logger.warning(f"[Queue] Failed to clear slots during force release of '{agent_name}': {e}")
+        capacity = get_capacity_manager()
+        result = await capacity.force_release(agent_name)
 
         return {
             "status": "released",
             "agent": agent_name,
-            "was_running": was_running,
-            "slots_cleared": slots_cleared,
+            "was_running": result.was_running,
+            "slots_cleared": result.slots_cleared,
             "warning": "Agent queue state and capacity slots have been reset. Any in-progress execution may still be running."
         }
     except Exception as e:

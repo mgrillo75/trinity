@@ -22,8 +22,7 @@ import httpx
 
 from database import db
 from models import TaskExecutionStatus
-from services.slot_service import get_slot_service
-from services.execution_queue import get_execution_queue
+from services.capacity_manager import get_capacity_manager
 from utils.helpers import utc_now, utc_now_iso, parse_iso_timestamp
 from utils.credential_sanitizer import sanitize_text
 
@@ -60,13 +59,14 @@ class CleanupReport:
     stale_activities: int = 0
     stale_slots: int = 0
     stale_slot_executions: int = 0  # Issue #219: executions failed when their slot was reclaimed
+    shared_files_purged: int = 0  # C4 / FILES-001: expired or old-revoked file shares
 
     @property
     def total(self) -> int:
         return (self.orphaned_executions + self.auto_terminated +
                 self.stale_executions + self.no_session_executions +
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
-                self.stale_slot_executions)
+                self.stale_slot_executions + self.shared_files_purged)
 
     def to_dict(self) -> Dict:
         return {
@@ -78,6 +78,7 @@ class CleanupReport:
             "stale_activities": self.stale_activities,
             "stale_slots": self.stale_slots,
             "stale_slot_executions": self.stale_slot_executions,
+            "shared_files_purged": self.shared_files_purged,
             "total": self.total,
         }
 
@@ -189,13 +190,13 @@ class CleanupService:
         # 3. Cleanup stale Redis slots and fail corresponding execution records
         #    (#219, #226, #378 — see _process_stale_slot_reclaims docstring).
         try:
-            slot_service = get_slot_service()
+            capacity = get_capacity_manager()
 
             # #226: Query per-agent timeouts from DB so slot cleanup uses the
             # correct TTL instead of a fixed 20-min default.
             agent_timeouts = db.get_all_execution_timeouts()
 
-            reclaimed = await slot_service.cleanup_stale_slots(
+            reclaimed = await capacity.reclaim_stale(
                 agent_timeouts=agent_timeouts
             )
             report.stale_slots = sum(len(ids) for ids in reclaimed.values())
@@ -216,6 +217,35 @@ class CleanupService:
                     logger.info(f"[Cleanup] Pruned {pruned} rate-limit events (>24h old)")
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning rate-limit events: {e}")
+
+        # 4b. Purge expired / old-revoked shared files (C4 / FILES-001).
+        # Every cycle — the set is usually small and both DB row + disk
+        # unlink are cheap. Grace period for revoked rows keeps them
+        # queryable for a day post-revoke (incident diagnosis).
+        try:
+            from pathlib import Path
+            stored_filenames = db.delete_expired_and_revoked_shared_files(
+                revoke_grace_hours=24
+            )
+            if stored_filenames:
+                storage_root = Path("/data/agent-files")
+                unlinked = 0
+                for sf in stored_filenames:
+                    try:
+                        p = storage_root / sf
+                        if p.exists():
+                            p.unlink()
+                            unlinked += 1
+                    except Exception as e:
+                        logger.warning(f"[Cleanup] failed to unlink {sf}: {e}")
+                report.shared_files_purged = len(stored_filenames)
+                logger.info(
+                    f"[Cleanup] Purged {len(stored_filenames)} shared-file "
+                    f"rows ({unlinked} files unlinked from /data/agent-files/)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error purging shared files: {e}")
+
         self._cycle_count += 1
 
         self.last_run_at = utc_now_iso()
@@ -589,21 +619,16 @@ class CleanupService:
             # Race condition: execution completed normally between check and update
             return False
 
-        # Release capacity slot (idempotent — no error if already released)
+        # Release capacity (idempotent — no error if already released).
+        # CAPACITY-CONSOLIDATE (#428): single CapacityManager.release_if_matches
+        # replaces the prior slot_service.release_slot + queue.force_release_if_matches
+        # pair. The match check preserves the TOCTOU-safety the original Lua
+        # script provided.
         try:
-            slot_service = get_slot_service()
-            await slot_service.release_slot(agent_name, execution_id)
+            capacity = get_capacity_manager()
+            await capacity.release_if_matches(agent_name, execution_id)
         except Exception as e:
-            logger.warning(f"[Watchdog] Error releasing slot for {execution_id}: {e}")
-
-        # Atomically release execution queue only if THIS execution holds the slot.
-        # Uses Lua script to prevent TOCTOU race where a new execution could start
-        # between checking and releasing.
-        try:
-            queue = get_execution_queue()
-            await queue.force_release_if_matches(agent_name, execution_id)
-        except Exception as e:
-            logger.warning(f"[Watchdog] Error releasing queue for agent '{agent_name}': {e}")
+            logger.warning(f"[Watchdog] Error releasing capacity for {execution_id}: {e}")
 
         # Broadcast WebSocket event with combined error (includes original context)
         await self._broadcast_watchdog_event(action, agent_name, execution_id, combined_error)
@@ -713,7 +738,7 @@ async def recover_orphaned_executions() -> Dict:
     if not running:
         return {"recovered": 0, "still_running": 0, "errors": 0}
 
-    slot_service = get_slot_service()
+    capacity = get_capacity_manager()
 
     # Group by agent to minimize container/HTTP checks
     by_agent: Dict[str, list] = {}
@@ -730,7 +755,7 @@ async def recover_orphaned_executions() -> Dict:
         if not container or container.status != "running":
             # Container down — all executions for this agent are orphaned
             for execution in executions:
-                if await _recover_execution(execution, agent_name, slot_service):
+                if await _recover_execution(execution, agent_name, capacity):
                     recovered += 1
                 else:
                     errors += 1
@@ -752,7 +777,7 @@ async def recover_orphaned_executions() -> Dict:
             if execution["id"] in registry_ids:
                 still_running += 1
             else:
-                if await _recover_execution(execution, agent_name, slot_service):
+                if await _recover_execution(execution, agent_name, capacity):
                     recovered += 1
                 else:
                     errors += 1
@@ -764,15 +789,16 @@ async def recover_orphaned_executions() -> Dict:
     return {"recovered": recovered, "still_running": still_running, "errors": errors}
 
 
-async def _recover_execution(execution: Dict, agent_name: str, slot_service) -> bool:
-    """Mark a single execution as orphaned and release its slot. Returns True on success."""
+async def _recover_execution(execution: Dict, agent_name: str, capacity) -> bool:
+    """Mark a single execution as orphaned and release its capacity. Returns True on success."""
     try:
-        db.update_execution_status(
+        # Use the guarded writer so a real completion that arrived during restart
+        # is not overwritten (RELIABILITY-005).
+        db.mark_execution_failed_by_watchdog(
             execution_id=execution["id"],
-            status=TaskExecutionStatus.FAILED,
-            error="Execution orphaned — recovered on backend restart",
+            error_message="Execution orphaned — recovered on backend restart",
         )
-        await slot_service.release_slot(agent_name, execution["id"])
+        await capacity.release(agent_name, execution["id"])
         return True
     except Exception as e:
         logger.error(f"[Recovery] Error recovering execution {execution['id']}: {e}")

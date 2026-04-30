@@ -497,7 +497,12 @@ const closeEditor = () => {
 const getPlaceholder = (filename) => {
   const placeholders = {
     '.env': 'OPENAI_API_KEY=sk-...\nANTHROPIC_API_KEY=sk-ant-...',
-    '.mcp.json': '{\n  "mcpServers": {\n    "trinity": {\n      "command": "npx",\n      "args": ["-y", "@anthropic-ai/trinity-mcp-server"]\n    }\n  }\n}',
+    // `.mcp.json` content is structure-validated at save (#598).
+    // The `trinity` server name is reserved (auto-injected on agent start);
+    // the example shows a real MCP server (context7) with the validated
+    // shape: command from allowlist (npx/uvx/python/python3/node/bun/deno/docker),
+    // args without shell metacharacters, env values as ${VAR} or safe literals.
+    '.mcp.json': '{\n  "mcpServers": {\n    "context7": {\n      "command": "npx",\n      "args": ["-y", "@upstash/context7-mcp@latest"]\n    }\n  }\n}',
     '.mcp.json.template': '{\n  "mcpServers": {}\n}'
   }
   return placeholders[filename] || ''

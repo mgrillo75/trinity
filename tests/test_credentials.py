@@ -100,7 +100,13 @@ class TestCredentialInject:
         api_client: TrinityApiClient,
         created_agent
     ):
-        """POST /api/agents/{name}/credentials/inject can write multiple files."""
+        """POST /api/agents/{name}/credentials/inject can write multiple files.
+
+        Note: as of #590 (2026-04-30), the user-facing allowlist is
+        {.env, .credentials.enc} — .mcp.json and .mcp.json.template were
+        removed because raw injection of those files was an RCE-by-config
+        vector (AISEC-C2). This test now exercises the still-allowed pair.
+        """
         unique = uuid.uuid4().hex[:8].upper()
 
         response = api_client.post(
@@ -108,7 +114,7 @@ class TestCredentialInject:
             json={
                 "files": {
                     ".env": f"KEY_{unique}=value\n",
-                    ".mcp.json": '{"mcpServers": {}}'
+                    ".credentials.enc": "encrypted-blob-placeholder",
                 }
             }
         )

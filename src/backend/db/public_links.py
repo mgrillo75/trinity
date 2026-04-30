@@ -319,6 +319,42 @@ class PublicLinkOperations:
 
         return True, email
 
+    def validate_agent_session(
+        self, agent_name: str, session_token: str
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Validate a session token against ANY public link for the agent.
+
+        A session verified on any of an agent's public links counts as
+        valid for cross-resource access — specifically, FILES-001
+        downloads (/api/files/{id}) reuse this instead of minting a
+        separate verification flow.
+
+        Returns: (is_valid, email_if_valid)
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT v.email, v.session_expires_at
+                  FROM public_link_verifications v
+                  JOIN agent_public_links l ON v.link_id = l.id
+                 WHERE l.agent_name = ?
+                   AND v.session_token = ?
+                   AND v.verified = 1
+                """,
+                (agent_name, session_token),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return False, None
+
+        email, session_expires = row
+        if _utcnow() > _parse_aware(session_expires):
+            return False, None
+        return True, email
+
     def count_recent_verification_requests(self, email: str, minutes: int = 10) -> int:
         """Count verification requests for an email in the last N minutes."""
         cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()

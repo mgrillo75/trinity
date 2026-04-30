@@ -81,19 +81,22 @@ def test_mirror_matches_source():
 
 
 def test_protected_paths_lists_unchanged():
-    """S4 is NOT allowed to touch PROTECTED_PATHS or EDIT_PROTECTED_PATHS.
+    """Snapshot guard for the file-protection lists in agent_server/files.py.
 
-    Those delete/edit semantics are owned by the existing Files API
-    contract. The reset-preserve-state operation (#384) is the PR allowed
-    to consume the allowlist for protection decisions; this PR adds the
-    primitive only.
+    The lists govern delete/edit semantics on the agent's workspace files.
+    Originally introduced as a tripwire for S4 (#383) to prove that PR was
+    scoped to add a reader helper only. The snapshot was refreshed by #590
+    (AISEC-C2) to add `.mcp.json` and `.credentials.enc` to the edit-protected
+    list — closing the RCE-by-config bypass where owners overwrote .mcp.json
+    with attacker tool definitions.
+
+    If this fails: either you intentionally changed the protection semantics
+    (refresh the snapshot, reference your issue here) or upstream drifted
+    (refresh and document why).
     """
     source = _FILES_PY.read_text()
 
-    # Byte-exact snapshot of the two lists as they exist on upstream/main
-    # at the time S4 lands. If this fails, either (a) you changed the
-    # protection semantics — move that work to #384, or (b) upstream has
-    # evolved and the snapshot needs refreshing in a separate commit.
+    # PROTECTED_PATHS (delete protection) — unchanged since S4
     expected_protected = (
         "PROTECTED_PATHS = [\n"
         '    "CLAUDE.md",\n'
@@ -105,20 +108,24 @@ def test_protected_paths_lists_unchanged():
         '    ".mcp.json.template",\n'
         "]"
     )
+    # EDIT_PROTECTED_PATHS (edit protection) — refreshed by #590:
+    # added .mcp.json and .credentials.enc.
     expected_edit_protected = (
         "EDIT_PROTECTED_PATHS = [\n"
         '    ".trinity",\n'
         '    ".git",\n'
         '    ".gitignore",\n'
         '    ".env",\n'
+        '    ".mcp.json",\n'
         '    ".mcp.json.template",\n'
+        '    ".credentials.enc",\n'
         "]"
     )
     assert expected_protected in source, (
-        "PROTECTED_PATHS drifted — S4 is scoped to add a reader helper only."
+        "PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
     )
     assert expected_edit_protected in source, (
-        "EDIT_PROTECTED_PATHS drifted — S4 is scoped to add a reader helper only."
+        "EDIT_PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
     )
 
 

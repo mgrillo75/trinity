@@ -23,19 +23,19 @@
         </div>
 
         <!-- MCP Connection Info -->
-        <div class="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+        <div class="bg-status-info-50 dark:bg-status-info-900/30 border border-status-info-200 dark:border-status-info-800 rounded-lg p-4 mb-6">
           <div class="flex">
             <div class="flex-shrink-0">
-              <svg class="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+              <svg class="h-5 w-5 text-status-info-400" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
               </svg>
             </div>
             <div class="ml-3 flex-1">
-              <h3 class="text-sm font-medium text-blue-800 dark:text-blue-300">Connect to MCP Server</h3>
-              <p class="text-sm text-blue-700 dark:text-blue-400 mt-1">
-                Add this to your <code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">.mcp.json</code> configuration:
+              <h3 class="text-sm font-medium text-status-info-800 dark:text-status-info-300">Connect to MCP Server</h3>
+              <p class="text-sm text-status-info-700 dark:text-status-info-400 mt-1">
+                Add this to your <code class="bg-status-info-100 dark:bg-status-info-800 px-1 rounded">.mcp.json</code> configuration:
               </p>
-              <pre class="mt-2 bg-blue-100 dark:bg-blue-800 rounded p-3 text-xs overflow-x-auto text-blue-900 dark:text-blue-100">{
+              <pre class="mt-2 bg-status-info-100 dark:bg-status-info-800 rounded p-3 text-xs overflow-x-auto text-status-info-900 dark:text-status-info-100">{
   "mcpServers": {
     "trinity": {
       "type": "http",
@@ -71,8 +71,8 @@
                 <div class="flex items-center flex-1">
                   <div class="flex-shrink-0">
                     <div class="h-10 w-10 rounded-full flex items-center justify-center"
-                         :class="key.is_active ? 'bg-green-100 dark:bg-green-900/50' : 'bg-red-100 dark:bg-red-900/50'">
-                      <svg class="h-6 w-6" :class="key.is_active ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50' : 'bg-status-danger-100 dark:bg-status-danger-900/50'">
+                      <svg class="h-6 w-6" :class="key.is_active ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
                       </svg>
                     </div>
@@ -81,11 +81,11 @@
                     <div class="flex items-center">
                       <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ key.name }}</h3>
                       <span class="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                            :class="key.is_active ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 text-red-800 dark:text-red-300'">
+                            :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-800 dark:text-status-danger-300'">
                         {{ key.is_active ? 'Active' : 'Revoked' }}
                       </span>
                       <!-- Scope badge for admin visibility -->
-                      <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-800 dark:text-purple-300">
+                      <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
                         Agent
                       </span>
                       <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300">
@@ -118,13 +118,13 @@
                   <button
                     v-if="key.is_active"
                     @click="revokeKey(key.id)"
-                    class="inline-flex items-center px-3 py-1.5 border border-yellow-300 dark:border-yellow-600 shadow-sm text-xs font-medium rounded text-yellow-700 dark:text-yellow-300 bg-white dark:bg-gray-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30"
+                    class="inline-flex items-center px-3 py-1.5 border border-status-warning-300 dark:border-status-warning-600 shadow-sm text-xs font-medium rounded text-status-warning-700 dark:text-status-warning-300 bg-white dark:bg-gray-700 hover:bg-status-warning-50 dark:hover:bg-status-warning-900/30"
                   >
                     Revoke
                   </button>
                   <button
                     @click="deleteKey(key.id)"
-                    class="inline-flex items-center px-3 py-1.5 border border-red-300 dark:border-red-600 shadow-sm text-xs font-medium rounded text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30"
+                    class="inline-flex items-center px-3 py-1.5 border border-status-danger-300 dark:border-status-danger-600 shadow-sm text-xs font-medium rounded text-status-danger-700 dark:text-status-danger-300 bg-white dark:bg-gray-700 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/30"
                   >
                     Delete
                   </button>
@@ -195,21 +195,21 @@
         <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-2xl sm:w-full">
           <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
             <div class="flex items-center mb-4">
-              <div class="flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-green-100 dark:bg-green-900/50">
-                <svg class="h-6 w-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div class="flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-status-success-100 dark:bg-status-success-900/50">
+                <svg class="h-6 w-6 text-status-success-600 dark:text-status-success-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                 </svg>
               </div>
               <h3 class="ml-4 text-lg font-medium text-gray-900 dark:text-white">Your MCP API Key is Ready!</h3>
             </div>
 
-            <div class="bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
+            <div class="bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 rounded-lg p-4 mb-4">
               <div class="flex">
-                <svg class="h-5 w-5 text-yellow-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-status-warning-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
                 </svg>
                 <div class="ml-3">
-                  <p class="text-sm font-medium text-yellow-800 dark:text-yellow-300">
+                  <p class="text-sm font-medium text-status-warning-800 dark:text-status-warning-300">
                     Copy the configuration below before closing - the key won't be shown again!
                   </p>
                 </div>
@@ -228,7 +228,7 @@
                     @click="copyMcpConfig"
                     class="inline-flex items-center px-3 py-1 text-xs font-medium rounded-md"
                     :class="copiedConfig
-                      ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300'
+                      ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300'
                       : 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900'"
                   >
                     <svg v-if="!copiedConfig" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -274,7 +274,7 @@
                     <svg v-if="!copied" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                     </svg>
-                    <svg v-else class="h-5 w-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg v-else class="h-5 w-5 text-status-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
                   </button>

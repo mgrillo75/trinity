@@ -5,7 +5,7 @@ Provides real-time voice conversations with agents via Gemini Live API.
 Endpoints:
   POST /api/agents/{name}/voice/start - Initialize voice session
   POST /api/agents/{name}/voice/stop  - End voice session and save transcript
-  WS   /ws/voice/{voice_session_id}   - Audio streaming bridge
+  WS   /ws/voice/{voice_session_id}   - Audio streaming bridge (audio + tool_call + tool_result)
 """
 
 import asyncio
@@ -14,6 +14,7 @@ import json
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 
@@ -23,6 +24,7 @@ from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED
 from services.gemini_voice import voice_service
 from services.docker_service import get_agent_container
+from services.platform_audit_service import platform_audit_service, AuditEventType, AuditActorType
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ router = APIRouter(tags=["voice"])
 
 class VoiceStartRequest(BaseModel):
     session_id: Optional[str] = None  # Existing chat session to continue
+    voice_name: Optional[str] = None  # Gemini voice name (e.g. "Kore", "Puck")
 
 
 class VoiceStartResponse(BaseModel):
@@ -92,10 +95,8 @@ async def voice_start(
     if context_summary:
         combined_prompt += f"\n\n## Conversation so far:\n{context_summary}"
 
-    # Get voice name preference
-    voice_name = _get_voice_name(name)
+    voice_name = request.voice_name or _get_voice_name(name)
 
-    # Create the voice session
     session = voice_service.create_session(
         agent_name=name,
         chat_session_id=chat_session_id,
@@ -239,6 +240,37 @@ async def voice_websocket(
         except Exception:
             pass
 
+    async def on_tool_call(tool_name: str, args: dict):
+        try:
+            await websocket.send_json({
+                "type": "tool_call",
+                "tool": tool_name,
+                "args": args,
+            })
+        except Exception:
+            pass
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="voice_tool_call",
+            actor_type=AuditActorType.USER,
+            actor_id=str(session.user_id),
+            actor_email=session.user_email,
+            target_type="agent",
+            target_id=session.agent_name,
+            details={"tool": tool_name, "prompt_preview": str(args.get("prompt", ""))[:100]},
+            source="api",
+        )
+
+    async def on_tool_result(tool_name: str, result: str):
+        try:
+            await websocket.send_json({
+                "type": "tool_result",
+                "tool": tool_name,
+                "result_preview": result[:200],
+            })
+        except Exception:
+            pass
+
     # Start the Gemini connection in a background task
     gemini_task = asyncio.create_task(
         voice_service.connect_and_stream(
@@ -246,6 +278,8 @@ async def voice_websocket(
             on_audio_out=on_audio_out,
             on_transcript=on_transcript,
             on_status=on_status,
+            on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result,
         )
     )
 
@@ -294,7 +328,7 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
     Priority:
     1. Per-agent voice_system_prompt from DB (set via API)
     2. voice-agent-system-prompt.md from agent container's working directory
-    3. Error if neither exists
+    3. Auto-generated from agent template info (description + voice behaviour hints)
     """
     # 1. Check DB override
     prompt = db.get_voice_system_prompt(agent_name)
@@ -312,18 +346,34 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
                 user="developer",
             )
             output = result.output.decode("utf-8").strip() if hasattr(result, 'output') else str(result).strip()
-            if output and "No such file" not in output:
+            if output and "No such file" not in output and len(output) > 10:
                 return output
         except Exception as e:
             logger.debug(f"Could not read voice-agent-system-prompt.md from {agent_name}: {e}")
 
-    # 3. No prompt found — error
-    raise HTTPException(
-        status_code=400,
-        detail=f"No voice system prompt configured for agent '{agent_name}'. "
-               f"Create a 'voice-agent-system-prompt.md' file in the agent's working directory "
-               f"(/home/developer/voice-agent-system-prompt.md) or set one via the API."
+    # 3. Auto-generate from template info
+    description = None
+    if container:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
+                if resp.status_code == 200:
+                    info = resp.json()
+                    description = info.get("description") or info.get("summary")
+        except Exception:
+            pass
+
+    display_name = agent_name.replace("-", " ").title()
+    lines = [f"You are {display_name}, an AI agent."]
+    if description:
+        lines.append(f"\n{description}")
+    lines.append(
+        "\n## Voice Behaviour\n"
+        "You are in a voice conversation. Keep responses concise and natural for speech. "
+        "No bullet points, markdown formatting, or code blocks — speak as you would in conversation. "
+        "One idea at a time. Use the run_task tool when you need to look something up or take an action."
     )
+    return "\n".join(lines)
 
 
 def _get_voice_name(agent_name: str) -> str:

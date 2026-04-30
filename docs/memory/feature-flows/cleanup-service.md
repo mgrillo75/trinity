@@ -1,5 +1,7 @@
 # Feature: Cleanup Service (CLEANUP-001)
 
+> **Updated 2026-04-26 (#428):** Stale-slot reclaim and watchdog release now go through [`CapacityManager`](capacity-management.md) — `capacity.reclaim_stale(agent_timeouts)` replaces `slot_service.cleanup_stale_slots(...)` and `capacity.release_if_matches(agent, exec_id)` replaces the prior pair of `slot_service.release_slot` + `execution_queue.force_release_if_matches`. Recovery (`_recover_execution`) calls `capacity.release(...)`. `ExecutionQueue` is gone; the TOCTOU-safe match check lives on the new facade.
+
 ## Overview
 Background service that periodically recovers stuck intermediate states. Includes active watchdog reconciliation (Issue #129) that checks agent process registries, recovers orphaned executions, auto-terminates timed-out executions, and releases capacity. Also marks stale executions, activities, and Redis slots as failed. Runs every 5 minutes with an immediate startup sweep.
 

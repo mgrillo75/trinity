@@ -363,8 +363,8 @@ The file browser feature uses a **thin router + service layer** architecture:
 - `path` (query, required) - File path to update
 - `body.content` (body, required) - New file content
 
-**Protected Paths**: Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json.template`
-**Note**: `CLAUDE.md` and `.mcp.json` ARE editable since users need to modify them
+**Protected Paths** (#590, AISEC-C2): Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`
+**Note**: `CLAUDE.md` IS editable (owners manage agent instructions). `.mcp.json` is no longer editable here — raw content defines executable tool commands; use the platform regenerate-from-template flow.
 
 **Response**:
 ```json
@@ -542,17 +542,19 @@ PROTECTED_PATHS = [
 - `path` (query, required) - File path to update
 - `content` (body, required) - New file content
 
-**Edit-Protected Paths** (Line 169-175):
+**Edit-Protected Paths** (refreshed by #590 / AISEC-C2):
 ```python
-# CLAUDE.md and .mcp.json ARE editable since users need to modify them
 EDIT_PROTECTED_PATHS = [
     ".trinity",
     ".git",
     ".gitignore",
     ".env",
-    ".mcp.json.template",
+    ".mcp.json",          # added #590 — raw injection = RCE-by-config
+    ".mcp.json.template", # ditto (envsubst doesn't sanitize attacker JSON)
+    ".credentials.enc",   # added #590 — overwrite swaps encrypted backup
 ]
 ```
+**Defense in depth**: the backend `update_agent_file_logic` in `src/backend/services/agent_service/files.py` runs the same deny check (broader: also blocks `.ssh/*`, `.aws/*`, `/opt/trinity/*`, etc.) BEFORE proxying to the agent-server, so a future router/proxy gap can't bypass the agent-server's check.
 
 **Business Logic**:
 1. Validate path is within workspace

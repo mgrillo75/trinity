@@ -30,9 +30,10 @@ Read backend routers, frontend views, feature flows, and recent changes to produ
 | Feature flow index | `docs/memory/feature-flows.md` | Yes | No |
 | Requirements | `docs/memory/requirements.md` | Yes | No |
 | Architecture | `docs/memory/architecture.md` | Yes | No |
-| Deployment config | `.env.example`, `scripts/deploy/*.sh`, `docker-compose.yml` | Yes | No |
+| Deployment config | `.env.example`, `scripts/deploy/*.sh`, `docker-compose.yml`, `docker-compose.prod.yml`, `deploy.config.example` | Yes | No |
 | Trinity Docs site | `../trinity-docs/app/getting-started/*.tsx` | Yes | No |
 | Abilities repo | `github.com/abilityai/abilities` (README) | Yes | No |
+| Ops runbook (private, pattern source for ops content) | `../ops-runbook/playbooks/*.md`, `../ops-runbook/instances/_template/scripts/*.sh`, `../ops-runbook/instances/_template/CLAUDE.md` | Yes | No |
 | Git history | `git log --since` | Yes | No |
 | Existing user docs | `docs/user-docs/**/*.md` | Yes | Yes |
 
@@ -47,11 +48,55 @@ These tutorial-style guides walk users through end-to-end tasks. Keep them in sy
 
 | Guide | Source | Purpose |
 |-------|--------|---------|
-| `guides/deploying-trinity.md` | `trinity-docs/app/getting-started/deploying-trinity/page.tsx` | Cloud vs self-hosted setup |
+| `guides/deploying-trinity.md` | `trinity-docs/app/getting-started/deploying-trinity/page.tsx` + this skill's deploy hub rules | Hub: cloud vs self-hosted decision, prerequisites, links into spokes |
+| `guides/deploying/local-development.md` | `docker-compose.yml`, `scripts/deploy/start.sh`, `.env.example` | Docker Desktop, dev compose, hot reload, base image build |
+| `guides/deploying/single-server.md` | `docker-compose.prod.yml`, `deploy.config.example`, `.env.example` | VPS/bare-metal: prod compose, env, base image, email, Redis password, host paths |
+| `guides/deploying/public-access.md` | `docker-compose.prod.yml` (cloudflared profile), `.env.example` (TUNNEL_TOKEN, PUBLIC_CHAT_URL) | Cloudflare Tunnel, public webhook surface, DNS |
+| `guides/deploying/upgrading.md` | This skill's operational template + ops runbook patterns | Pre-flight → backup → pull → rebuild platform services → restart → verify → rollback |
+| `guides/deploying/backup-and-restore.md` | This skill's operational template + ops runbook patterns | Volume-mounted alpine `cp` pattern, retention, daily cron template |
+| `guides/deploying/monitoring.md` | This skill's operational template + ops runbook patterns + `/api/ops/fleet/health` router | Six health probes, fleet-health API, resource thresholds table, common-recovery patterns |
 | `guides/using-trinity.md` | `trinity-docs/app/getting-started/using-trinity/page.tsx` | UI tour: dashboard, agents, monitoring |
 | `guides/building-agents.md` | `trinity-docs/app/getting-started/building-agents/page.tsx` | Create, develop, deploy with abilities |
 
 **Sync rule**: When the trinity-docs source changes, update the corresponding guide to match. Convert TSX to markdown, preserving structure and content. **Code wins on conflict** — if trinity-docs disagrees with `.env.example`, `scripts/deploy/*.sh`, or `docker-compose.yml`, fix the local guide to match observed repo behavior and note the divergence for upstream.
+
+**Ops-runbook rule**: Pages under `guides/deploying/` (especially `upgrading.md`, `backup-and-restore.md`, `monitoring.md`) draw their *patterns* from the local private ops runbook. Treat that as a pattern library, not a paste source. See Step 2h for what's safe to import vs. what must stay private.
+
+### Deployment config reading rules
+
+When reading scripts and compose files to produce deployment docs:
+
+1. Read `scripts/deploy/start.sh` literally — document what it **actually does**, not what comments say it does
+2. Check `docker-compose.yml` environment blocks for which vars are **actually forwarded** to each service
+3. For vars in `.env.example` marked `[PROD]` or `[OVERLAY]`, note their scope clearly — do not present them as universally available in dev compose
+4. Never describe a feature as "auto" unless the script code proves it is
+5. `verify-platform.sh` is the canonical six-probe checklist — reference it by name, don't duplicate it inline
+
+### Operational guide template
+
+Pages under `guides/deploying/` that cover operations (upgrade, backup, monitoring) follow this structure:
+
+```markdown
+## [Operation Name]
+
+[One sentence: what this operation does and when to run it]
+
+### Pre-flight
+
+[What to check before starting. Backup steps. Smoke tests.]
+
+### Steps
+
+[Numbered, concrete commands. No vague instructions.]
+
+### Verify
+
+[How to confirm success. Commands to run. What to look for.]
+
+### Rollback
+
+[How to undo if something went wrong. Commands to restore prior state.]
+```
 
 ## Target Structure
 
@@ -59,7 +104,14 @@ These tutorial-style guides walk users through end-to-end tasks. Keep them in sy
 docs/user-docs/
 ├── README.md                          # Index + navigation
 ├── guides/                            # Tutorial-style walkthroughs
-│   ├── deploying-trinity.md          # Cloud vs self-hosted setup
+│   ├── deploying-trinity.md          # Hub: cloud vs self-hosted decision, links into spokes
+│   ├── deploying/                    # Self-hosted deployment spokes (per-scenario + ops)
+│   │   ├── local-development.md      # Docker Desktop, dev compose, hot reload, base image
+│   │   ├── single-server.md          # VPS/bare-metal: prod compose, env, email, backups
+│   │   ├── public-access.md          # Cloudflare Tunnel, PUBLIC_CHAT_URL, webhook surface
+│   │   ├── upgrading.md              # Pre-flight → backup → rebuild → restart → verify → rollback
+│   │   ├── backup-and-restore.md     # Volume-mounted alpine cp, retention, daily cron
+│   │   └── monitoring.md             # Six health probes, /api/ops/fleet/health, thresholds
 │   ├── using-trinity.md              # UI tour: dashboard, agents, monitoring
 │   └── building-agents.md            # Create, develop, deploy with abilities
 ├── getting-started/
@@ -140,7 +192,7 @@ git log --oneline --since="2 weeks ago" | head -30
 ```
 This identifies what has changed recently and which docs may need updating.
 
-**2e. Deployment config (for deploying/setup guides)** — Read `.env.example`, `scripts/deploy/start.sh`, `scripts/deploy/stop.sh`, and `docker-compose.yml`. Extract: required env vars, auto-generated vs user-set secrets, default ports and override vars (e.g., `FRONTEND_PORT`), first-boot behavior, and what the start/stop scripts actually print and do. This is the authoritative source for deploy/setup docs.
+**2e. Deployment config (for deploying/setup guides)** — Read `.env.example`, `scripts/deploy/start.sh`, `scripts/deploy/stop.sh`, `scripts/deploy/build-base-image.sh`, `docker-compose.yml`, `docker-compose.prod.yml`, `docker-compose.gitea.yml`, and `deploy.config.example`. Extract: required env vars, auto-generated vs user-set secrets, default ports and override vars (e.g., `FRONTEND_PORT`), first-boot behavior, and what the start/stop scripts actually print and do. **Cross-check `.env.example` keys against the `environment:` blocks in each compose file** — flag any key present in `.env.example` but not forwarded by a given compose as "prod-only / overlay-only / requires compose edit," because docs should not promise behavior the chosen compose can't deliver. This is the authoritative source for deploy/setup docs.
 
 **2f. Backend routers** — Glob `src/backend/routers/*.py` and read router files relevant to the section being written. Extract:
 - Endpoint paths and HTTP methods
@@ -151,6 +203,29 @@ This identifies what has changed recently and which docs may need updating.
 - UI layout and tab structure
 - User-facing labels and actions
 - State management patterns
+
+**2h. Ops-runbook patterns (for `guides/deploying/upgrading.md`, `backup-and-restore.md`, `monitoring.md`)** — Read the local private ops runbook: `playbooks/upgrade-instance.md`, `playbooks/monitoring-instance.md`, `instances/_template/CLAUDE.md`, and the helper scripts in `instances/_template/scripts/` (`update.sh`, `health-check.sh`, `restart.sh`, `status.sh`). Treat as a **pattern library**, not a paste source.
+
+**Safe to import (the rules and shapes that make production work):**
+- The "use `docker compose restart`, never `down/up`" rule and *why* (preserves agent containers and `trinity-agent-network`).
+- The "rebuild only platform services, not the base image" rule (`docker compose build --no-cache backend frontend mcp-server scheduler`).
+- The pre-flight → backup → pull → rebuild → restart → verify → rollback sequence shape.
+- The six-probe verification list (backend `/health`, scheduler `:8001/health`, frontend HTTP 200, redis PONG, MCP `/health`, Vector `:8686/health`).
+- The fleet-status API surface (`/api/ops/fleet/health`, `/api/ops/fleet/status`).
+- The resource-thresholds table (warning/critical bands for context %, CPU, memory, disk, error rate, container restarts, DB size, log size).
+- The volume-mounted alpine `cp` pattern for SQLite backup/restore.
+- Common-recovery patterns (agent network not found, agent context >90%, database locked).
+- The daily-DB-backup + 14-day-retention cron template.
+
+**Forbidden to import (private detail; would leak in a public repo):**
+- Any host name, IP address, Tailscale identity, or tailnet name.
+- Any `sshpass`, `ssh -i`, or `ssh user@host`-prefixed command — local-host examples only.
+- Any reference to specific instance directories (`instances/dgx/` etc.) or instance-specific scripts.
+- Any password, token, or API-key value (even masked) from ops `.env` files.
+- Any private repo name or internal path that reveals the ops repo's structure.
+- Multi-instance management workflows (`source .env && ./scripts/run.sh ...`) — that's an operator-fleet pattern, not a single-instance user pattern.
+
+When in doubt, rewrite the *idea* in localhost form. A production-ops `sshpass -p $PW ssh user@host "sudo docker logs trinity-backend"` becomes the public `docker logs trinity-backend`. The rule survives; the access pattern stays private.
 
 ### Step 3: Generate/Update Documentation
 
@@ -208,6 +283,137 @@ Only include if meaningful.]
 
 Use judgment: if the same content keeps needing to sit awkwardly inside "How It Works" or "Limitations," promote it to its own `##` section.
 
+#### Operational guide template (use for `guides/deploying/upgrading.md`, `backup-and-restore.md`, `monitoring.md`)
+
+The dual-audience template above is for *features*. Operational guides are *procedures with checkpoints* — different shape. Use this instead:
+
+```markdown
+# [Procedure Name]
+
+[1-2 sentence summary: what this procedure achieves and when an operator runs it.]
+
+## When to Run This
+
+[Trigger conditions. E.g. "Before every Trinity update," "Daily as a cron job,"
+"When the dashboard sync-health dot goes red." Concrete, not aspirational.]
+
+## Pre-flight
+
+- [ ] [Check 1 — e.g., backup target has space]
+- [ ] [Check 2 — e.g., no scheduled tasks running in the next N minutes]
+- [ ] [Check 3 — e.g., on the right branch / version]
+
+## Procedure
+
+### Step 1: [name]
+
+[What and why. Then the command in a code block. Then "expected output: ..."]
+
+### Step 2: [name]
+...
+
+## Verify
+
+After the procedure, confirm each of these returns the expected result. If any
+fails, do NOT proceed — go to **Rollback** or **Recovery** below.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Backend | `curl -s http://localhost:8000/health` | `{"status":"healthy",...}` |
+| ... | ... | ... |
+
+## Rollback / Recovery
+
+[For procedures with destructive or risky steps, include the inverse procedure.
+For monitoring guides, include common-issue resolution table instead.]
+
+## Automation
+
+[Optional: cron template, CI hook, or scheduling guidance if the procedure is
+intended to run regularly.]
+
+## See Also
+```
+
+**Why this shape:** operators care about (1) when to run, (2) safety pre-checks, (3) numbered steps, (4) explicit verification, (5) rollback. The feature template's "How It Works / For Agents / Limitations" doesn't map to any of those.
+
+#### Reusable snippets for operational guides
+
+The following are canonical snippets. Use verbatim across the deploy spokes so the same rule reads identically in every place. Do **not** paraphrase; consistency is the point.
+
+**The "use restart, never down/up" rule:**
+
+> **Use `docker compose restart`, not `down/up`.** `docker compose down` removes the `trinity-agent-network`, which orphans every running agent container — they keep running but lose their network and have to be removed and recreated. `restart` preserves both the agents and the network. The only times to use `down` are: (1) intentional full teardown, (2) recovering from a corrupted compose state.
+
+**The "rebuild platform services only" rule:**
+
+> When updating Trinity code, rebuild the platform images only:
+> ```bash
+> docker compose build --no-cache backend frontend mcp-server scheduler
+> ```
+> The `trinity-agent-base` image is **not** rebuilt by this command. It changes much less often, and rebuilding it forces every agent to be re-deployed. Rebuild it only when `docker/base-image/Dockerfile` itself changes, via `./scripts/deploy/build-base-image.sh`.
+
+**The six-probe verification list:**
+
+```bash
+# 1. Backend
+curl -s http://localhost:8000/health
+# Expected: {"status":"healthy",...}
+
+# 2. Scheduler
+curl -s http://localhost:8001/health
+# Expected: {"status":"healthy","active_schedules":N}
+
+# 3. Frontend (HTTP 200)
+curl -s -o /dev/null -w '%{http_code}' http://localhost
+# Expected: 200
+
+# 4. Redis
+docker exec trinity-redis redis-cli ping
+# Expected: PONG
+
+# 5. MCP Server
+curl -s http://localhost:8080/health
+# Expected: 200 OK
+
+# 6. Vector (log aggregation)
+docker exec trinity-vector wget -q -O - http://localhost:8686/health
+# Expected: non-empty response
+```
+
+**Resource thresholds table:**
+
+| Metric | Warning | Critical | Action |
+|---|---|---|---|
+| Backend `/health` | — | not 200 | Restart `trinity-backend` |
+| Scheduler `/health` | — | not 200 | Restart `trinity-scheduler` |
+| Agent context usage | >75% | >90% | Reset agent context or restart agent container |
+| Host CPU | >80% | >95% | Investigate runaway processes |
+| Host memory | >85% | >95% | Check container memory limits |
+| Disk free | <20% | <5% | Prune Docker, archive logs |
+| Error rate (per hour) | >10 | >50 | Inspect platform.json log |
+| Container restarts | any | repeated | `docker logs <container>` |
+| `trinity.db` size | >1 GB | >5 GB | Archive old data |
+| Vector log size | >5 GB | >10 GB | Trigger archival rotation |
+
+**SQLite backup pattern (volume-mounted alpine):**
+
+```bash
+# Backup (run on the host, with services running)
+docker run --rm \
+  -v trinity_trinity-data:/data \
+  -v ~/backups:/backup \
+  alpine cp /data/trinity.db /backup/trinity-$(date +%Y%m%d-%H%M%S).db
+
+# Restore (services stopped first)
+docker compose stop backend scheduler
+docker run --rm \
+  -v trinity_trinity-data:/data \
+  -v ~/backups:/backup \
+  alpine cp /backup/trinity-YYYYMMDD-HHMMSS.db /data/trinity.db
+docker compose start backend scheduler
+```
+
 3. **No redundancy** — Do not repeat information from other docs. Cross-reference instead. The `Concepts` section in `getting-started/overview.md` is the canonical glossary; other docs reference it rather than re-defining terms.
 
 4. **Code-derived accuracy** — Every claim must trace to code or a feature flow. Do not invent features. If a feature flow says "planned" or a router has TODO comments, note it as upcoming rather than documenting it as available.
@@ -263,25 +469,46 @@ Create directories and write all approved files:
 
 ```bash
 mkdir -p docs/user-docs/{getting-started,agents,credentials,collaboration,automation,operations,sharing-and-access,integrations,advanced,api-reference}
+mkdir -p docs/user-docs/guides/deploying
 ```
 
 Write each markdown file using the Write or Edit tool.
 
 ### Step 7: Verify
 
+**Count files written:**
+
 ```bash
 find docs/user-docs -name "*.md" -type f | wc -l
+```
+
+**Public-safety scan** — every page generated under `guides/deploying/` must pass these greps with zero hits. If any hit, the page is leaking ops-internal detail and must be rewritten:
+
+```bash
+# Tokens that indicate private-repo or operator-fleet patterns
+grep -rE 'sshpass|tailnet|ts\.net|ssh -i [^ ]+ [^ ]+@' docs/user-docs/guides/deploying/
+
+# Real IPs (allow only loopback and the documented agent subnet 172.28.0.0/16)
+grep -rE '\b(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+' docs/user-docs/guides/deploying/ \
+  | grep -vE '172\.28\.0\.[0-9]+/16'
+
+# Instance directory references that hint at private-repo structure
+grep -rE 'instances/[a-z0-9_-]+/' docs/user-docs/guides/deploying/
 ```
 
 Confirm the expected number of files were created/updated. Report the final count.
 
 ## Completion Checklist
 
-- [ ] All sections in target structure have corresponding files
-- [ ] Every doc follows the dual-audience template (How It Works + For Agents)
+- [ ] All sections in target structure have corresponding files (including `guides/deploying/` spokes)
+- [ ] Every feature doc follows the dual-audience template (How It Works + For Agents)
+- [ ] Every operational doc under `guides/deploying/` follows the operational template (When to Run → Pre-flight → Procedure → Verify → Rollback)
 - [ ] No redundant explanations across docs (MECE verified)
 - [ ] All API references link to Swagger (`/docs`) rather than duplicating schemas
-- [ ] No real credentials, internal URLs, or PII in any doc
+- [ ] Every key in `.env.example` is annotated in the relevant deploy spoke as: dev-compose / prod-compose-only / overlay-only / requires-compose-edit (no key promised to work in a compose that doesn't forward it)
+- [ ] Reusable snippets (the "use restart" rule, "rebuild platform services only" rule, six-probe verification, thresholds table, alpine `cp` backup pattern) are used verbatim, not paraphrased, across deploy spokes
+- [ ] No real credentials, internal URLs, host IPs, or PII in any doc
+- [ ] Public-safety greps from Step 7 return zero hits across `guides/deploying/`
 - [ ] README.md index is complete and links are valid
 - [ ] Changes reviewed by user before writing
 

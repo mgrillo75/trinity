@@ -1018,6 +1018,36 @@ export class TrinityClient {
   }
 
   // ============================================================================
+  // Outbound File Sharing (FILES-001)
+  // ============================================================================
+
+  /**
+   * Mint a public download URL for a file the agent wrote to its
+   * /home/developer/public/ directory. Requires the agent's file_sharing
+   * toggle to be enabled (see PUT /api/agents/{name}/file-sharing).
+   */
+  async shareAgentFile(
+    agentName: string,
+    data: {
+      filename: string;
+      display_name?: string;
+      expires_in?: number;
+    }
+  ): Promise<{
+    file_id: string;
+    url: string;
+    expires_at: string;
+    size_bytes: number;
+    mime_type?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/shared-files`,
+      data
+    );
+  }
+
+  // ============================================================================
   // Proactive Messaging (Issue #321)
   // ============================================================================
 

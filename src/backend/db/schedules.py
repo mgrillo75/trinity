@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
 # below so it doesn't misfire on other legitimate FAILED→SUCCESS transitions
 # (e.g. Phase 0 auto-terminate, Phase 1 stale cleanup, startup recovery).
-_STALE_SLOT_ERROR_PATTERN = "Stale execution — slot TTL expired"
 
 
 class ScheduleOperations:
@@ -1004,66 +1003,65 @@ class ScheduleOperations:
     ) -> bool:
         """Update execution status when completed.
 
+        CAS contract (RELIABILITY-005): SUCCESS writes are unconditional — the agent's
+        own completion result always wins. Non-success terminal writes (FAILED, CANCELLED)
+        are guarded so they cannot overwrite an already-terminal status, preventing
+        cleanup paths from silently clobbering a real completion.
+
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
         """
+        # Terminal states that a non-success write must not overwrite.
+        _TERMINAL = (
+            TaskExecutionStatus.SUCCESS,
+            TaskExecutionStatus.FAILED,
+            TaskExecutionStatus.CANCELLED,
+            TaskExecutionStatus.SKIPPED,
+        )
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Get started_at for duration calculation and current status/error
-            # for #378 residual-race observability (see log below).
             cursor.execute(
-                "SELECT started_at, status, error FROM schedule_executions WHERE id = ?",
+                "SELECT started_at FROM schedule_executions WHERE id = ?",
                 (execution_id,),
             )
             row = cursor.fetchone()
             if not row:
                 return False
 
-            # #378: warn when SUCCESS overwrites a Phase-3 phantom-stale FAILED.
-            # This lets us observe residual races in production without
-            # changing update semantics (agent's response still wins). Scoped
-            # to the stale-slot error pattern so other legitimate FAILED→SUCCESS
-            # transitions (Phase 0/1 recovery, startup recovery) don't misfire.
-            current_status = row["status"] if "status" in row.keys() else None
-            current_error = row["error"] if "error" in row.keys() else None
-            if (
-                status == TaskExecutionStatus.SUCCESS
-                and current_status == TaskExecutionStatus.FAILED
-                and current_error
-                and _STALE_SLOT_ERROR_PATTERN in current_error
-            ):
-                logger.warning(
-                    f"[DB] SUCCESS overwrote Phase-3 stale-slot FAILED for execution "
-                    f"{execution_id} — residual race condition (#378). Prior error: "
-                    f"{current_error[:200]}"
-                )
-
-            # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-            cursor.execute("""
-                UPDATE schedule_executions
-                SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
-                    context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
-                    claude_session_id = ?
-                WHERE id = ?
-            """, (
-                status,
-                to_utc_iso(completed_at),  # Use UTC with 'Z' suffix
-                duration_ms,
-                response,
-                error,
-                context_used,
-                context_max,
-                cost,
-                tool_calls,
-                execution_log,
-                claude_session_id,
-                execution_id
-            ))
+            if status == TaskExecutionStatus.SUCCESS:
+                # Agent's own completion result always wins.
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
+                        context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
+                        execution_log = ?, claude_session_id = ?
+                    WHERE id = ?
+                """, (
+                    status, to_utc_iso(completed_at), duration_ms, response, error,
+                    context_used, context_max, cost, tool_calls, execution_log,
+                    claude_session_id, execution_id,
+                ))
+            else:
+                # Non-success terminal write: block if already terminal so cleanup
+                # paths cannot overwrite a real completion (RELIABILITY-005).
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
+                        context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
+                        execution_log = ?, claude_session_id = ?
+                    WHERE id = ? AND status NOT IN (?, ?, ?, ?)
+                """, (
+                    status, to_utc_iso(completed_at), duration_ms, response, error,
+                    context_used, context_max, cost, tool_calls, execution_log,
+                    claude_session_id, execution_id, *_TERMINAL,
+                ))
+
             conn.commit()
             return cursor.rowcount > 0
 
@@ -1532,14 +1530,17 @@ class ScheduleOperations:
                 started_at = parse_iso_timestamp(row["started_at"])
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 # SQL literal matches TaskExecutionStatus.FAILED
+                # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
+                # between the SELECT and this UPDATE is never overwritten.
                 cursor.execute("""
                     UPDATE schedule_executions
                     SET status = ?,
                         completed_at = ?,
                         duration_ms = ?,
                         error = 'Marked as failed by cleanup: exceeded ' || ? || '-minute timeout'
-                    WHERE id = ?
-                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_minutes), row["id"]))
+                    WHERE id = ? AND status = ?
+                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_minutes),
+                      row["id"], TaskExecutionStatus.RUNNING))
 
             conn.commit()
             return len(stale_rows)
@@ -1580,14 +1581,17 @@ class ScheduleOperations:
             for row in no_session_rows:
                 started_at = parse_iso_timestamp(row["started_at"])
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+                # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
+                # between the SELECT and this UPDATE is never overwritten.
                 cursor.execute("""
                     UPDATE schedule_executions
                     SET status = ?,
                         completed_at = ?,
                         duration_ms = ?,
                         error = 'Silent launch failure: no Claude session created within ' || ? || ' seconds'
-                    WHERE id = ?
-                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_seconds), row["id"]))
+                    WHERE id = ? AND status = ?
+                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_seconds),
+                      row["id"], TaskExecutionStatus.RUNNING))
 
             conn.commit()
             return len(no_session_rows)

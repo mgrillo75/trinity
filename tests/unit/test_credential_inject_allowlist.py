@@ -1,19 +1,26 @@
 """
-Unit tests for credential injection file path allowlist (#183).
+Unit tests for credential injection file path allowlist (#183, #590, #598).
 
-Verifies that only approved credential file paths can be injected into agents.
-Prevents arbitrary file write via parameter tampering on POST /api/agents/{name}/credentials/inject.
+Verifies that only approved credential file paths can be injected into agents
+via the **user-facing** backend endpoint. Layered defense:
 
-Module: src/backend/routers/credentials.py (backend), docker/base-image/agent_server/routers/credentials.py (agent)
-Issue: https://github.com/abilityai/trinity/issues/183
+  Path layer  (this file)    →  ALLOWED_CREDENTIAL_PATHS gate
+  Content layer (#598)       →  validate_mcp_config for .mcp.json content
+                                 (covered by tests/unit/test_mcp_validator.py)
+
+Path-level history:
+- #183 (2026-03-27) — introduced the allowlist; rejected arbitrary paths
+- #590 (2026-04-30) — removed .mcp.json + .mcp.json.template (AISEC-C2 RCE)
+- #598 (Layer 2)    — re-allowed .mcp.json (gated by structure validation
+                       at the content layer); .mcp.json.template stays out
+
+Module: src/backend/routers/credentials.py
 """
 
 import pytest
 
-# ---- Inline reimplementation of validation logic for unit testing ----
-# Mirrors the allowlist check in both backend and agent-side routers.
-
-ALLOWED_CREDENTIAL_PATHS = {".env", ".mcp.json", ".mcp.json.template", ".credentials.enc"}
+# Inline mirror of the path allowlist in src/backend/routers/credentials.py
+ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
 
 
 def validate_credential_paths(files: dict) -> list:
@@ -24,27 +31,53 @@ def validate_credential_paths(files: dict) -> list:
 # ---- Tests: Allowed paths ----
 
 class TestAllowedPaths:
-    """Paths that MUST be accepted."""
+    """Paths that MUST be accepted by the path layer.
+
+    .mcp.json passes the path gate but is then content-validated; see
+    tests/unit/test_mcp_validator.py for the content-layer assertions.
+    """
 
     def test_env_file(self):
         assert validate_credential_paths({".env": "KEY=value"}) == []
 
-    def test_mcp_json(self):
-        assert validate_credential_paths({".mcp.json": "{}"}) == []
-
-    def test_mcp_json_template(self):
-        assert validate_credential_paths({".mcp.json.template": "${VAR}"}) == []
-
     def test_credentials_enc(self):
         assert validate_credential_paths({".credentials.enc": "encrypted-data"}) == []
+
+    def test_mcp_json(self):
+        """#598: .mcp.json passes the path gate (content validated separately)."""
+        assert validate_credential_paths({".mcp.json": "{}"}) == []
 
     def test_multiple_valid_files(self):
         files = {
             ".env": "KEY=val",
-            ".mcp.json": "{}",
             ".credentials.enc": "data",
+            ".mcp.json": '{"mcpServers": {}}',
         }
         assert validate_credential_paths(files) == []
+
+
+# ---- Tests: still-blocked paths (post-#598) ----
+
+class TestStillBlockedPaths:
+    """#598 only re-allowed .mcp.json. .mcp.json.template stays blocked
+    because the envsubst flow it feeds into doesn't sanitize attacker JSON.
+    All other arbitrary paths remain rejected by the path layer.
+    """
+
+    def test_mcp_json_template_still_blocked(self):
+        """envsubst doesn't sanitize: attacker JSON survives unchanged
+        into .mcp.json on the next regenerate."""
+        evil = '{"mcpServers": {"e": {"command": "/bin/sh"}}}'
+        disallowed = validate_credential_paths({".mcp.json.template": evil})
+        assert disallowed == [".mcp.json.template"]
+
+    def test_env_still_works_alongside_blocked_template(self):
+        """Mixed batch with .env (legit) + .mcp.json.template (blocked):
+        whole batch rejected on the disallowed entry."""
+        files = {".env": "KEY=val", ".mcp.json.template": "{}"}
+        disallowed = validate_credential_paths(files)
+        assert ".mcp.json.template" in disallowed
+        assert ".env" not in disallowed
 
 
 # ---- Tests: Blocked paths ----

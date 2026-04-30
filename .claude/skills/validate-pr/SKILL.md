@@ -29,6 +29,19 @@ Validate a pull request against the Trinity development methodology and generate
 
 ## Process
 
+### Quick Triage (30 seconds)
+
+Before deep validation, check the basics:
+1. PR has an issue link (`Fixes #N` or `Closes #N` in title or body)
+2. Priority label on the linked issue — P0/P1 get closer scrutiny
+3. PR size — if 50+ files changed, flag as potentially needing a split
+
+```bash
+gh pr view $PR_NUMBER --json title,body,labels | jq '{title: .title, body: .body[:300]}'
+```
+
+If the PR has no issue link, flag as ❌ CRITICAL immediately.
+
 ### Step 1: Fetch PR Information
 
 ```bash
@@ -51,6 +64,14 @@ Store this information for validation:
 - Base and head branches
 - Author
 
+#### 1.1 Base Branch Check
+Verify `baseRefName` is `dev` (unless this is a release-cut PR from `dev` → `main`):
+- [ ] PR targets `dev` (not `main` directly, unless it's a release PR)
+- If targeting `main`: flag as ❌ CRITICAL unless PR title/body indicates a release cut
+
+#### 1.2 PR Size Check
+- If `changedFiles >= 50`: flag as ⚠️ WARNING — "Large PR, consider splitting"
+
 ### Step 2: Validate Documentation Updates
 
 #### 2.1 Commit Messages (REQUIRED)
@@ -72,7 +93,7 @@ Check if PR references a GitHub Issue (e.g., "Closes #17", "Fixes #23").
 **Validation**:
 - [ ] PR references related issue(s) in description
 - [ ] Issue has correct priority label (priority-p0/p1/p2/p3)
-- [ ] Issue has correct type label (type-feature/bug/refactor)
+- [ ] Issue has correct type label (type-feature/bug/refactor/docs)
 
 #### 2.3 Requirements Update (CONDITIONAL)
 Check if `docs/memory/requirements.md` is in the changed files list.
@@ -227,6 +248,8 @@ Create the report in this format:
 | Category | Status | Notes |
 |----------|--------|-------|
 | Commit Messages | ✅/❌ | [details] |
+| Base Branch | ✅/❌ | targets dev (or release cut to main) |
+| PR Size | ✅/⚠️ | [file count] |
 | Roadmap | ✅/❌/➖ | [details or N/A] |
 | Requirements | ✅/❌/➖ | [details or N/A] |
 | Architecture | ✅/❌/➖ | [details or N/A] |
@@ -305,10 +328,20 @@ Please address these items and request re-review.
 
 ## Related
 
-- `docs/DEVELOPMENT_WORKFLOW.md` - Development cycle
+- `docs/DEVELOPMENT_WORKFLOW.md` - Development cycle and reviewer pipeline
 - `docs/memory/feature-flows.md` - Feature flow index
-- `.claude/agents/feature-flow-analyzer.md` - Flow format specification
-- `/security-check` - Security validation details
+- `/review` - Complementary code review (SQL safety, race conditions, auth, scope drift, test gaps)
+- `/cso --diff` - Deep security audit (required for P0/P1 features)
+
+### Review Pipeline by PR Type
+
+| PR Type | `/review` | `/validate-pr` | `/cso --diff` |
+|---------|-----------|----------------|----------------|
+| Feature (P0/P1) | Required | Required | Required |
+| Feature (P2/P3) | Required | Required | Recommended |
+| Bug fix | Required | Required | Skip (unless auth/security) |
+| Refactor | Required | Required | Skip |
+| Docs only | Skip | Required | Skip |
 
 ## Completion Checklist
 

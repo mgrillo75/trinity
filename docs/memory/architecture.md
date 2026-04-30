@@ -96,7 +96,8 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Core Agent:*
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
-- `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders
+- `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
+- `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
 - `agent_ssh.py` - SSH access endpoint
 - `credentials.py` - Credential injection/export/import (CRED-002 simplified system)
@@ -170,9 +171,9 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 
 *Execution & Scheduling:*
 - `task_execution_service.py` - Unified task execution lifecycle (slot mgmt, activity tracking, sanitization) (EXEC-024)
-- `slot_service.py` - Parallel execution slot management with dynamic TTL (CAPACITY-001)
-- `backlog_service.py` - Persistent SQLite-backed FIFO backlog for async tasks at capacity (BACKLOG-001)
-- `execution_queue.py` - Redis-based execution queueing
+- `capacity_manager.py` - **Unified capacity facade (#428, CAPACITY-CONSOLIDATE).** Single public API for admit/release/status across `/chat` (`max_concurrent=max_parallel_tasks`, `queue_in_memory` policy) and `/task` (`queue_persistent` policy). Composes `slot_service.py` and `backlog_service.py` internally; owns the in-memory overflow store (Redis LIST, depth 3). Replaces the prior three-class pyramid (`SlotService` + `ExecutionQueue` + `BacklogService`); `ExecutionQueue` deleted, the other two are now private internals.
+- `slot_service.py` - Internal: atomic N-ary capacity counter (Redis ZSET) with dynamic per-agent TTL (CAPACITY-001). Used only by `CapacityManager`.
+- `backlog_service.py` - Internal: persistent SQLite-backed FIFO overflow store with drain-on-release (BACKLOG-001). Used only by `CapacityManager`.
 - `scheduler_service.py` - APScheduler-based scheduling service
 - `cleanup_service.py` - Active watchdog reconciliation + passive stale recovery for executions, activities, and slots (CLEANUP-001, #129)
 
@@ -199,6 +200,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
+- `agent_shared_files_service.py` - Outbound file sharing: path validation, MIME blocklist, quota, Docker `get_archive` extraction, URL building (FILES-001)
 
 **Channel Adapters (`adapters/`)** — Pluggable external messaging (SLACK-002):
 
@@ -322,6 +324,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
+| `files.ts` (1) | `share_file` | Outbound file sharing — publish file from `/home/developer/public/` and return download URL (FILES-001) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -357,11 +360,13 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 **Internal Server:** `agent-server.py`
 - FastAPI app on port 8000
 - `/api/chat` - Claude Code execution (messages persisted to database)
-- `/api/health` - Health check
+- `/health` - Health check
 - `/api/credentials/update` - Hot-reload credentials
 - `/api/chat/session` - Context window stats
 - `/api/files` - List workspace files (recursive tree structure)
 - `/api/files/download` - Download file content (100MB limit)
+
+**Template-supplied pre-check** (optional, SCHED-COND-001): if the template ships an executable `~/.trinity/pre-check` file, the backend's internal endpoint `POST /api/internal/agents/{name}/pre-check` runs it via `docker exec` before the scheduler fires a cron-triggered chat. The hook is **language-agnostic** — interpreter is selected by the file's shebang line (Python, bash, node, compiled binary, …); Trinity does not invoke `python3` for it. The hook's stdout becomes the chat message; empty stdout + exit 0 records a skipped execution. No HTTP endpoint is exposed on the agent-server for this — the primitive is the same `execute_command_in_container` already used by `services/git_service.py` (persistent-state allowlist), `ssh_service.py`, and the agent terminal.
 
 **Persistent Chat:**
 - All chat messages automatically saved to SQLite (`chat_sessions`, `chat_messages`)
@@ -395,8 +400,9 @@ Services that run continuously in the backend process:
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
-| **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. |
-| **Backlog Maintenance** | `backlog_service.py` | Expires stale queued tasks (>24h) and drains orphans after restart. Runs every 60s. (BACKLOG-001) |
+| **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
+| **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. (BACKLOG-001 / CAPACITY-CONSOLIDATE #428) |
+| **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
 
 The **agent server** also runs a 15-min `auto_sync` heartbeat loop (gated
 by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
@@ -502,6 +508,11 @@ picks up on its next poll. (#389 S1a)
 | PUT | `/api/agents/{name}/timeout` | Set execution timeout (60-7200s, default 900s = 15min) |
 | GET | `/api/agents/{name}/guardrails` | Get per-agent guardrails config (NEW: 2026-04-15) |
 | PUT | `/api/agents/{name}/guardrails` | Set per-agent guardrails overrides (GUARD-001) |
+| GET | `/api/agents/{name}/file-sharing` | Get outbound file-sharing status + quota (NEW: 2026-04-24, FILES-001) |
+| PUT | `/api/agents/{name}/file-sharing` | Enable/disable outbound file sharing (owner-only; returns `restart_required`) |
+| POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key; used by `share_file` MCP tool) |
+| GET | `/api/agents/{name}/shared-files` | List active (non-revoked, non-expired) shared files with download counts |
+| DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
 
 **Note**: Route ordering is critical. `/context-stats` and `/autonomy-status` must be defined BEFORE `/{name}` catch-all route to avoid 404 errors.
 
@@ -609,7 +620,7 @@ picks up on its next poll. (#389 S1a)
 | DELETE | `/api/mcp/keys/{id}` | Delete API key |
 | GET | `/oauth/{provider}/authorize` | Start OAuth |
 | GET | `/oauth/{provider}/callback` | OAuth callback |
-| GET | `/api/health` | Health check |
+| GET | `/health` | Health check (unauthenticated, top-level — no `/api/` prefix) |
 
 ### Fleet Sync Audit (#390 / S6)
 
@@ -675,6 +686,15 @@ export, enable/disable toggle. Issue #20 can be closed.
 | GET | `/api/nevermined/agents/{name}/payments` | JWT | Payment history |
 | GET | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
 | POST | `/api/nevermined/retry-settlement/{log_id}` | Admin | Retry settlement |
+
+### Outbound File Sharing (FILES-001, NEW: 2026-04-24)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download. 401 on bad/missing sig, 404 on unknown id, 410 on revoked/expired, `Content-Disposition: attachment; filename="..."`, `X-Content-Type-Options: nosniff`, rate-limited per IP, audit event `file_share_download` |
+| POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server path — mint a download URL (used by agent-server direct calls, not the MCP tool) |
+
+Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume (no compose changes). Agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); backend uses Docker SDK `get_archive` to extract the named file on demand — never mounts the agent workspace.
 
 ### Platform Settings (3 endpoints)
 
@@ -993,6 +1013,43 @@ CREATE INDEX idx_shared_folders_consume ON agent_shared_folder_config(consume_en
 - Permission-gated: only agents with permissions (via `agent_permissions`) can mount
 - Container recreation on restart when mount config changes
 - Volume ownership automatically fixed to UID 1000
+
+**agent_shared_files:** (FILES-001 — Outbound File Sharing, NEW: 2026-04-24)
+```sql
+CREATE TABLE agent_shared_files (
+    id TEXT PRIMARY KEY,                  -- UUID
+    agent_name TEXT NOT NULL,
+    filename TEXT NOT NULL,               -- Display name in download
+    stored_filename TEXT NOT NULL,        -- UUID filename under /data/agent-files/
+    size_bytes INTEGER NOT NULL,
+    mime_type TEXT,                       -- python-magic detected
+    download_token TEXT UNIQUE NOT NULL,  -- secrets.token_urlsafe(32), 192-bit
+    created_by TEXT NOT NULL,             -- Agent name (or user for admin-created)
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,             -- Default 7d
+    revoked_at TEXT,                      -- Set when manually revoked
+    one_time INTEGER DEFAULT 0,           -- Deferred: one-time link mode (column retained for future)
+    consumed_at TEXT,                     -- Deferred
+    download_count INTEGER DEFAULT 0,
+    last_downloaded_at TEXT,
+    FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX idx_agent_files_agent ON agent_shared_files(agent_name);
+CREATE INDEX idx_agent_files_token ON agent_shared_files(download_token);
+CREATE INDEX idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL;
+-- Also: agent_ownership.file_sharing_enabled INTEGER DEFAULT 0
+```
+
+**Outbound File Sharing Features:**
+- Per-agent opt-in via `agent_ownership.file_sharing_enabled`
+- Publish dir is a Docker volume `agent-{name}-public` mounted at `/home/developer/public/` inside the agent
+- Backend stores extracted bytes at `/data/agent-files/{file_id}` (under existing `trinity-data` volume — no compose changes)
+- Agent extracts via Docker SDK `get_archive` on demand — backend never mounts the agent workspace (filesystem-isolated blast radius)
+- Query param is `?sig={token}` (NOT `?download_token=`) to avoid the credential sanitizer's `.*TOKEN.*` pattern redacting it in agent transcripts
+- URL format: `{public_chat_url}/api/files/{file_id}?sig={token}` — uses existing `/api/*` proxy rules on Vite dev + prod nginx
+- FK has `ON UPDATE CASCADE` + `ON DELETE CASCADE` (aspirational — platform doesn't `PRAGMA foreign_keys=ON`; the agent delete handler + `rename_agent()` manually cascade as is the platform convention)
+- Manually cascaded in: `routers/agents.py` delete handler (rows + on-disk files + volume), `db/agent_settings/metadata.py:rename_agent` (updates `agent_name` in 17 tables)
 
 **agent_event_subscriptions:** (EVT-001 - Agent Event Pub/Sub)
 ```sql
@@ -1448,9 +1505,17 @@ Agent starts → If .credentials.enc exists → Decrypt → Write files
 
 Internal endpoints (`/api/internal/`) used by the scheduler and agent containers require shared-secret authentication via `X-Internal-Secret` header. Falls back to `SECRET_KEY` if `INTERNAL_API_SECRET` env var is not set.
 
-### WebSocket Security (C-002)
+### WebSocket Security (C-002, #550)
 
-The `/ws` endpoint requires JWT authentication. Token provided via `?token=` query parameter or as first message (`Bearer <token>`, 5s timeout). Unauthenticated connections are rejected. The `/ws/events` endpoint requires MCP API key authentication (unchanged).
+The `/ws` endpoint uses **single-use opaque tickets** instead of a JWT in the URL. Browser flow:
+
+1. Authenticated client `POST /api/ws/ticket` (JWT in `Authorization` header) → backend mints a 32-byte urlsafe ticket, stores it in Redis with a 30s TTL, and returns it.
+2. Client connects to `/ws?ticket=<opaque>`. Backend atomically `GETDEL`s the Redis key (Redis 6.2+) — single-use — resolves it to the authenticated subject, and only then accepts the WebSocket.
+3. Reconnects re-mint a fresh ticket; the JWT never enters the WebSocket URL.
+
+This closes the JWT-leak surface flagged by the April 2026 remediation pentest (finding 3.2.1): nginx access logs, browser history, and upstream proxies no longer see the JWT. CSWSH is mitigated because the ticket endpoint requires the JWT in an `Authorization` header — a malicious page can't mint a ticket on the victim's behalf without an explicit cross-origin request, which CORS rejects. Implementation lives in `services/ws_ticket_service.py` + `routers/ws_tickets.py`.
+
+The `/ws/events` endpoint still uses `?token=trinity_mcp_xxx` (MCP API key) for compatibility with documented external scripts (`websocat`, `wscat`); MCP keys are scoped, named, and revocable so the leak surface is bounded relative to a JWT.
 
 **Reconnect replay (RELIABILITY-003, #306):** Both `/ws` and `/ws/events` accept an optional `?last-event-id=<stream_id>` query param. The value is regex-gated (`^\d+-\d+$`) by `validate_last_event_id()` in `services/event_bus.py` before reaching `XRANGE`; malformed input is ignored (no catchup). Catchup is capped at `REPLAY_GAP_LIMIT=5000` entries — a larger gap returns `{"type": "resync_required", "reason": "gap_too_large"}` instead of an unbounded `XRANGE`. Authorization (`accessible_agents` for `/ws/events`) is re-applied on replay, not just on live fan-out.
 

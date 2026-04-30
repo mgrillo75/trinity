@@ -3,7 +3,7 @@
 > **Requirement ID**: SUB-003
 > **Extends**: SUB-002 (Subscription Management)
 > **Priority**: HIGH
-> **Status**: ⏳ Not Started
+> **Status**: ✅ Implemented (2026-03-21), updated 2026-04-25 (#441 — threshold 2 → 1, broadened to auth failures, default flipped to on)
 
 ---
 
@@ -11,13 +11,15 @@
 
 When an agent hits a Claude subscription usage limit ("out of extra usage"), all scheduled and interactive executions fail with HTTP 429 until the subscription resets (often hours/days away). The user must manually notice the error, go to Settings, and reassign a different subscription. This is disruptive for autonomous agents that run on schedules.
 
+The same disruption happens on auth-class failures (401/403, expired OAuth token, low credit balance) — those signal the subscription itself is broken and need the same auto-recovery.
+
 ## Requirements
 
 ### Preconditions (ALL must be true for auto-switch to trigger)
 
-1. **Repeated failure**: The agent has encountered a subscription rate-limit error in **2 or more consecutive executions** (not just a single transient hit)
+1. **Subscription failure observed**: The agent has just received either a rate-limit (429) **or** an auth-class failure (401/403/credit balance/expired token) on its current subscription. (Pre-#441 this required 2 consecutive 429s — that gate is removed; the 2h skip-list on alternative selection is the only thrash guard now.)
 2. **Multiple subscriptions available**: There are **≥2 subscription credentials** registered in the system
-3. **Setting enabled**: A system-level setting **"Allow automatic subscription switching"** is checked (opt-in, default OFF)
+3. **Setting enabled**: A system-level setting **"Allow automatic subscription switching"** is checked. Default **ON** (opt-out) per #441 — operators who explicitly disable it keep their choice.
 
 ### Behavior
 
@@ -32,8 +34,8 @@ When all three preconditions are met:
 
 3. **Log the switch**: Create a structured log entry and agent activity event:
    ```
-   [SUB-003] Auto-switched agent "{agent_name}" from subscription "{old_sub}" to "{new_sub}"
-   after {n} consecutive rate-limit errors
+   [SUB-003] Auto-switching agent "{agent_name}" from "{old_sub}" to "{new_sub}"
+   after {a rate-limit error | an authentication failure}
    ```
 
 4. **Notify**: Send a notification (via existing notification system) to the agent owner so they're aware of the automatic switch
@@ -49,9 +51,9 @@ When all three preconditions are met:
 
 ### Settings UI
 
-- Add a checkbox to **Settings → Subscriptions** section: **"Automatically switch subscriptions when usage limits are reached"**
-- Below the checkbox, show helper text: _"When enabled, agents will automatically try a different subscription after 2 consecutive rate-limit errors. Requires at least 2 registered subscriptions."_
-- Store as system setting: `auto_switch_subscriptions` (boolean, default `false`)
+- Checkbox in **Settings → Subscriptions** section: **"Automatically switch subscriptions when usage limits or auth failures are reached"**
+- Helper text: _"When enabled, agents automatically try a different subscription on the first rate-limit (429) or auth failure (401/403/expired token/low credit). Requires at least 2 registered subscriptions."_
+- Store as system setting: `auto_switch_subscriptions` (boolean, default `true` per #441 — opt-out, not opt-in)
 
 ### Dashboard Visibility
 
@@ -107,19 +109,24 @@ Backend logs event, sends notification, retries execution
 - **All subscriptions exhausted**: Log warning, do not switch, surface error to user as today
 - **Agent has ANTHROPIC_API_KEY (not subscription)**: Auto-switch does not apply — only for subscription-based agents
 - **Concurrent switches**: Use DB-level locking to prevent two agents from switching to the same subscription simultaneously
-- **Rapid flip-flopping**: If an agent switches and the new subscription also hits a limit, the 2-consecutive-error requirement prevents immediate re-switch — it needs 2 more failures first, giving time for the original to reset
+- **Rapid flip-flopping** (#441): the 2h skip-list on alternative selection (`is_subscription_rate_limited` + `select_best_alternative_subscription`) is the only thrash guard. When an agent switches A→B and B also fails, A stays flagged for 2h post-switch (by the still-recorded events from before the switch — see #444), so no ping-pong back to A.
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] System setting `auto_switch_subscriptions` exists and defaults to OFF
-- [ ] Settings UI shows checkbox with helper text in Subscriptions section
-- [ ] Rate-limit errors are tracked per (agent, subscription) with timestamps
-- [ ] After 2+ consecutive rate-limit errors, agent is auto-switched to a different subscription
-- [ ] Rate-limited subscriptions (last 2 hours) are skipped during selection
-- [ ] Auto-switch is logged as an activity event on the agent
-- [ ] Notification is sent to agent owner on auto-switch
-- [ ] Failed execution is retried once after successful switch
-- [ ] No switch occurs if setting is disabled, only 1 subscription exists, or all alternatives are rate-limited
-- [ ] Subscription badge in agent header updates after auto-switch
+- [x] System setting `auto_switch_subscriptions` exists and defaults to ON (#441 — flipped to opt-out)
+- [x] Settings UI shows checkbox with helper text in Subscriptions section
+- [x] Subscription failure events are tracked per (agent, subscription) with timestamps
+- [x] **A single rate-limit (429) failure** triggers auto-switch to a different subscription (#441 — threshold 2 → 1)
+- [x] **A single auth-class failure** (401/403/credit balance/expired token/etc.) also triggers auto-switch (#441 — broadened scope)
+- [x] Rate-limited subscriptions (last 2 hours) are skipped during selection — no regression on the ping-pong guard (#444)
+- [x] Auto-switch is logged as an activity event on the agent
+- [x] Notification is sent to agent owner on auto-switch (text adapts per failure kind)
+- [x] No switch occurs if setting is disabled, only 1 subscription exists, or all alternatives are recently rate-limited
+- [x] Subscription badge in agent header updates after auto-switch
+
+## History
+
+- 2026-03-21 — initial implementation (issue #153, threshold = 2, 429-only, default OFF)
+- 2026-04-25 — #441: threshold dropped to 1, broadened to auth-class failures, default flipped to ON. `handle_rate_limit_error` kept as a backward-compat shim around the new `handle_subscription_failure(failure_kind=…)`.

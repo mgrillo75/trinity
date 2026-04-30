@@ -48,28 +48,33 @@ def _load_public_router():
         routers_pkg.__package__ = "routers"
         sys.modules["routers"] = routers_pkg
 
-    # fastapi stubs (only the names actually used by routers/public.py)
-    if "fastapi" not in sys.modules:
-        fastapi_mod = types.ModuleType("fastapi")
-        fastapi_mod.APIRouter = MagicMock(return_value=MagicMock())
-        fastapi_mod.HTTPException = Exception
-        fastapi_mod.Request = MagicMock()
-        fastapi_mod.Depends = MagicMock()
-        sys.modules["fastapi"] = fastapi_mod
+    # Stub fastapi unconditionally so that response_model= annotations on
+    # router decorators in routers/public.py don't trigger real Pydantic
+    # validation when loaded in a combined pytest session (where
+    # test_inter_agent_timeout_unit.py already imported the real FastAPI).
+    fastapi_mod = types.ModuleType("fastapi")
+    fastapi_mod.APIRouter = MagicMock(return_value=MagicMock())
+    fastapi_mod.HTTPException = Exception
+    fastapi_mod.Request = MagicMock()
+    fastapi_mod.Depends = MagicMock()
+    fastapi_mod.exceptions = types.ModuleType("fastapi.exceptions")
+    fastapi_mod.routing = types.ModuleType("fastapi.routing")
+    sys.modules["fastapi"] = fastapi_mod
+    sys.modules["fastapi.exceptions"] = fastapi_mod.exceptions
 
-    if "fastapi.responses" not in sys.modules:
-        fr_mod = types.ModuleType("fastapi.responses")
-        fr_mod.StreamingResponse = MagicMock()
-        sys.modules["fastapi.responses"] = fr_mod
+    fr_mod = types.ModuleType("fastapi.responses")
+    fr_mod.StreamingResponse = MagicMock()
+    sys.modules["fastapi.responses"] = fr_mod
 
-    if "pydantic" not in sys.modules:
-        pydantic_mod = types.ModuleType("pydantic")
-        pydantic_mod.BaseModel = object  # make class definitions work
-        sys.modules["pydantic"] = pydantic_mod
-
-    # Application-level stubs
+    # Application-level stubs.
+    # Use setdefault for most stubs (don't overwrite stubs other test files
+    # installed for their own purposes), EXCEPT for `database` which must
+    # always be a MagicMock so that `from database import X` works when
+    # loading routers/public.py.  test_inter_agent_timeout_unit.py installs
+    # a types.SimpleNamespace (not a MagicMock) via setdefault, which does
+    # not support attribute-access style imports.
+    sys.modules["database"] = MagicMock()
     stubs = {
-        "database": MagicMock(),
         "routers.auth": MagicMock(
             check_login_rate_limit=MagicMock(),
             record_login_attempt=MagicMock(),

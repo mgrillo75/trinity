@@ -27,14 +27,16 @@ ChannelMessageRouter._handle_message_inner()
 Step 3b: File upload rate limit (5/min per user)
   ↓
 Step 7b: _handle_file_uploads(adapter, message, agent_name, container, session_id)
+  → downloads each file via adapter.download_file() → assembles raw_files list
+  → delegates to services/upload_service.process_file_uploads() (#364)
   ↓
-For each file:
+process_file_uploads() for each file:
   ├── Unsupported format? → skip with message
-  ├── _sanitize_filename(): NFKC + basename + safe-chars + 200-char
+  ├── sanitize_filename(): NFKC + basename + safe-chars + 200-char
   │     truncation + collision dedup (-1, -2, …) (#487)
-  ├── adapter.download_file() → bytes (channel-agnostic)
-  ├── Image? → base64 → "[File uploaded by {uploader}]: name (size) — image
-  │     attached inline\n![name](data:mime;base64,…)"
+  ├── size check against limit
+  ├── magic-byte MIME validation (python-magic, graceful fallback)
+  ├── Image? → base64 vision block → image_data list (via stream-json)
   └── Text?  → tar archive → container_put_archive to uploads/{session_id}/
               → "[File uploaded by {uploader}]: name (size) saved to {path}"
   ↓
@@ -68,22 +70,28 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 
 ### Message Router (`adapters/message_router.py`)
 - Step 3b: File upload rate limit (`_FILE_UPLOAD_RATE_LIMIT_MAX=5`, 60s window)
-- Step 7b: `_handle_file_uploads(verified_email=...)` — download, route by type,
-  copy/embed; returns `(descriptions, upload_dir, all_writes_failed)`
-- Filename sanitization (`_sanitize_filename`, #487): NFKC unicode normalize
-  → `os.path.basename` → safe-chars regex → `file_{id}` fallback (empty,
-  dot-only, or hidden dotfiles like `.env`) → 200-char truncation preserving
-  extension → collision dedup with `-1`, `-2`, … suffix
-- Session ID sanitization: `re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)` for shell safety
+- Step 7b: `_handle_file_uploads(verified_email=...)` — downloads each file via
+  `adapter.download_file()`, then delegates to `upload_service.process_file_uploads()` (#364)
+  The inline validation/write logic was extracted to the shared service so web chat
+  (ChatPanel, PublicChat) reuses the same path
+- `_sanitize_filename()` and `_format_file_size()` in this file delegate to
+  `services/upload_service.sanitize_filename()` / `format_file_size()`
 - Chat injection format: `[File uploaded by {uploader}]: {name} ({size}) saved
   to {path}` — `uploader` is the verified email (Issue #311) or
   `adapter.get_source_identifier(message)`
-- Image budget: 5MB/image, 10MB total, excess skipped
-- Unsupported MIME rejection: PDF, ZIP, tar, gzip, rar, video/*, audio/*
-- Allowed tools: `Read` added only for non-image files
 - All-writes-failed handling: when every write attempt fails, reply via
   channel with explicit error and skip agent execution (#487 AC6)
 - Cleanup on all exit paths (success, task failure, exception, all-failed abort)
+
+### Upload Service (`services/upload_service.py`) — shared since #364
+- `process_file_uploads()` — core logic: sanitize, size-check, MIME-validate, image/file dispatch
+- `sanitize_filename()`: NFKC normalize → `os.path.basename` → safe-chars → hidden-dotfile
+  rejection → 200-char truncation → collision dedup with `-1`, `-2`, … suffix (#487)
+- Channel limits: `CHANNEL_MAX_FILES=10`, `CHANNEL_MAX_FILE_SIZE=10MB`
+- Image budget: `CHANNEL_MAX_IMAGE_SIZE=5MB`, `CHANNEL_MAX_TOTAL_IMAGE_SIZE=10MB`
+- Unsupported MIME rejection: PDF, ZIP, tar, gzip, rar, video/*, audio/*
+- Magic-byte MIME validation via python-magic (graceful fallback if unavailable)
+- Session ID sanitized with `re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)` for shell safety
 
 ### Slack Service (`services/slack_service.py`)
 - `download_file(bot_token, url, max_size)`: GET with Authorization header, follow redirects, 10MB cap
@@ -153,3 +161,4 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 
 - [slack-channel-routing.md](slack-channel-routing.md) — Channel adapter abstraction (SLACK-002)
 - [slack-integration.md](slack-integration.md) — Original Slack integration (SLACK-001)
+- [web-chat-file-upload.md](web-chat-file-upload.md) — Web chat file upload (ChatPanel + PublicChat), uses same shared upload_service (#364)

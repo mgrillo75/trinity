@@ -38,7 +38,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 
 ### Agent Detail — Sharing Tab (Per-Agent)
 - `SlackChannelPanel.vue` — Three states:
-  - **Bound**: Shows `#channel-name`, workspace name, DM default badge, "Unbind" button
+  - **Bound**: Shows `#channel-name`, workspace name, DM-default badge **or** "Make default" button (with hover tooltip explaining DM routing), and "Unbind" button. The Unbind button is **disabled** when this agent is the DM default *and* the workspace has other bound agents — promoting another agent first via the "Make default" button on its panel is required (#584).
   - **Unbound**: "Create Slack Channel" button → creates channel in Slack + binds to agent
   - **Access denied**: Informational message for non-owner shared users
 - `SharingPanel.vue` — Renders `SlackChannelPanel` between Team Sharing and Public Links sections
@@ -55,9 +55,10 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - `POST /api/settings/slack/install` → `{oauth_url}` (browser redirect)
 
 ### API Calls (Per-Agent Channel)
-- `GET /api/agents/{name}/slack/channel` → `{bound, channel_name, channel_id, workspace_name}`
+- `GET /api/agents/{name}/slack/channel` → `{bound, channel_name, channel_id, workspace_name, is_dm_default, workspace_agent_count}`
 - `POST /api/agents/{name}/slack/channel` → `{status, channel_name, channel_id, workspace_name}`
-- `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}`
+- `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}` — **409** if the agent is the workspace's DM default and other agents are still bound (#584)
+- `PUT /api/agents/{name}/slack/channel/dm-default` → `{status, team_id, workspace_name, previous, new_default}` — owner-only; single-tx clear-then-set on `is_dm_default`; audit-logged via `AGENT_LIFECYCLE/slack_dm_default_changed` (#584)
 
 ## Backend Layer
 
@@ -110,6 +111,8 @@ Priority in `SlackAdapter.get_agent_name()`:
 | GET | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Connection status |
 | DELETE | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Disconnect |
 | PUT | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Update settings (enable/disable) |
+| PUT | `/api/agents/{name}/slack/channel/dm-default` | `routers/slack.py` | Make this agent the DM-default for its workspace (#584) |
+| DELETE | `/api/agents/{name}/slack/channel` | `routers/slack.py` | Unbind — refuses with 409 if agent is the DM default and others are bound (#584) |
 
 ### Business Logic
 

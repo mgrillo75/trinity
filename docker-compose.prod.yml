@@ -40,8 +40,6 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       - GITHUB_PAT=${GITHUB_PAT}
-      - AUTH0_DOMAIN=${AUTH0_DOMAIN}
-      - AUTH0_ALLOWED_DOMAIN=${AUTH0_ALLOWED_DOMAIN:-ability.ai}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # OpenTelemetry Configuration (Optional)
@@ -94,9 +92,6 @@ services:
       dockerfile: ../../docker/frontend/Dockerfile.prod
       args:
         - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
-        - VITE_AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-10tz4lo7hcoijxav.us.auth0.com}
-        - VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID:-bFeIEm4WAwaalgSnxsfS1V6vd4gOk0li}
-        - VITE_AUTH0_ALLOWED_DOMAIN=${AUTH0_ALLOWED_DOMAIN:-ability.ai}
     image: trinity-frontend:prod
     container_name: trinity-frontend
     restart: unless-stopped

@@ -1,12 +1,13 @@
 """
 Pydantic models for the Trinity backend API.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 from datetime import datetime
 from enum import Enum
 
 from utils.helpers import to_utc_iso
+from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 
 
 class AgentConfig(BaseModel):
@@ -95,6 +96,7 @@ class ParallelTaskRequest(BaseModel):
     chat_session_id: Optional[str] = None  # Explicit chat session ID to save messages to (for continuing existing sessions)
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
     inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
+    files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
 
 
 # ============================================================================
@@ -184,17 +186,30 @@ class ExecutionSource(str, Enum):
 
 class TaskExecutionStatus(str, Enum):
     """
-    Canonical status values for task/schedule executions persisted to the database.
+    Canonical status values for task/schedule executions (RELIABILITY-005).
 
-    Used across: TaskExecutionService, db/schedules.py, scheduler/database.py, chat.py, cleanup_service.py.
-    NOT used by: ExecutionQueue (uses QueueItemStatus).
+    State machine — allowed transitions and authorized writers:
+
+        [create]  → QUEUED       writer: TaskExecutionService / BacklogService
+        QUEUED    → RUNNING      writer: BacklogService (drain) / TaskExecutionService
+        RUNNING   → SUCCESS      writer: TaskExecutionService (agent HTTP response — always wins)
+        RUNNING   → FAILED       writer: TaskExecutionService / CleanupService (guarded: no overwrite of terminal)
+        RUNNING   → CANCELLED    writer: terminate handler (guarded)
+        RUNNING   → PENDING_RETRY writer: scheduler retry handler (#271)
+        PENDING_RETRY → RUNNING  writer: scheduler retry dispatch
+        any       → SKIPPED      writer: TaskExecutionService (capacity overflow path)
+
+    CAS invariant (db/schedules.py update_execution_status): SUCCESS writes are
+    unconditional; all other terminal writes are blocked if the row is already
+    in a terminal state, preventing cleanup paths from overwriting a real completion.
     """
-    QUEUED = "queued"  # BACKLOG-001: Persisted async task waiting for a free slot
+    QUEUED = "queued"          # Persisted async task waiting for a free slot (BACKLOG-001)
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+    PENDING_RETRY = "pending_retry"  # Awaiting retry dispatch (#271)
 
 
 class BusinessStatus(str, Enum):
@@ -406,3 +421,58 @@ class GithubPatPropagationResult(BaseModel):
     updated: List[str]
     skipped: List[AgentPropagationStatus]
     failed: List[AgentPropagationStatus]
+
+
+# =============================================================================
+# Outbound File Sharing (FILES-001)
+# =============================================================================
+
+class ShareFileRequest(BaseModel):
+    """Body for POST /api/internal/agent-files/share (internal, agent-server path)."""
+    agent_name: str = Field(..., max_length=128)
+    filename: str = Field(..., min_length=1, max_length=255)
+    display_name: Optional[str] = Field(default=None, max_length=255)
+    expires_in: Optional[int] = None
+    # NOTE: `one_time` is deferred — the schema retains the columns
+    # so we can re-enable it later without a migration.
+
+
+class ShareFileMcpRequest(BaseModel):
+    """Body for POST /api/agents/{agent_name}/shared-files (MCP path).
+
+    The agent_name lives in the URL, so the body only needs the
+    per-share parameters.
+    """
+    filename: str = Field(..., min_length=1, max_length=255)
+    display_name: Optional[str] = Field(default=None, max_length=255)
+    expires_in: Optional[int] = None
+
+
+class ShareFileResponse(BaseModel):
+    """Response payload for a successful share."""
+    file_id: str
+    url: str
+    expires_at: str
+    size_bytes: int
+    mime_type: Optional[str] = None
+
+
+class SharedFileInfo(BaseModel):
+    """One row in the owner's file-sharing panel."""
+    file_id: str
+    filename: str
+    size_bytes: int
+    mime_type: Optional[str] = None
+    url: str
+    created_at: str
+    expires_at: str
+    download_count: int
+    last_downloaded_at: Optional[str] = None
+
+
+class SharedFilesList(BaseModel):
+    """Response for GET /api/agents/{name}/shared-files."""
+    agent_name: str
+    files: List[SharedFileInfo]
+    total_bytes: int
+    quota_bytes: int

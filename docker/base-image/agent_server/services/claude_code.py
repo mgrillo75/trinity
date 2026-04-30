@@ -140,16 +140,18 @@ class ClaudeCodeRuntime(AgentRuntime):
         timeout_seconds: int = 900,
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
         Args:
             resume_session_id: Optional session ID to resume (EXEC-023)
+            images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
-            max_turns, execution_id, resume_session_id
+            max_turns, execution_id, resume_session_id, images=images,
         )
 
 
@@ -220,6 +222,8 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             message_content = msg.get("message", {}).get("content", [])
 
             for content_block in message_content:
+                if not isinstance(content_block, dict):
+                    continue  # stream-json content arrays can contain plain strings
                 block_type = content_block.get("type")
 
                 if block_type == "tool_use":
@@ -397,6 +401,8 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
             logger.debug(f"Processing {msg_type} message with {len(message_content)} content blocks")
 
         for content_block in message_content:
+            if not isinstance(content_block, dict):
+                continue  # stream-json content arrays can contain plain strings
             block_type = content_block.get("type")
 
             if block_type == "tool_use":
@@ -686,8 +692,13 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     f"[Chat] Outer timeout on session {execution_id} "
                     f"— killing process group as last resort"
                 )
-                _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
-                _safe_close_pipes(process)
+                # _terminate_process_group does up to 4s of process.wait() (SIGTERM grace + SIGKILL grace);
+                # off-load to the executor so the event loop stays responsive while we tear down.
+                await loop.run_in_executor(
+                    None,
+                    lambda: _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid),
+                )
+                await loop.run_in_executor(None, _safe_close_pipes, process)
                 raise HTTPException(
                     status_code=504,
                     detail=f"Chat execution timed out after {timeout_seconds} seconds"
@@ -935,6 +946,7 @@ def _classify_signal_exit(
 def _classify_empty_result(
     metadata: Optional['ExecutionMetadata'] = None,
     raw_message_count: int = 0,
+    raw_messages: Optional[List[Dict]] = None,
 ) -> Optional[Tuple[int, str]]:
     """Classify a clean (return_code == 0) exit that produced no result message.
 
@@ -956,6 +968,10 @@ def _classify_empty_result(
     nullability could be a Claude format quirk; both-None is a strong
     signal that the terminal ``result`` message never arrived.
 
+    When the result line is lost, metadata.tool_count / num_turns are also
+    None (populated only by that line). Derive honest counts from
+    raw_messages when available so the 502 detail is accurate. (#531)
+
     Returns ``(status_code, detail)`` for empty-result exits, or ``None``
     if metadata looks well-formed (caller proceeds with the normal
     response-building path).
@@ -965,8 +981,18 @@ def _classify_empty_result(
     if metadata.cost_usd is not None or metadata.duration_ms is not None:
         return None
 
+    # tool_count is accumulated per-message during parsing (line ~1467), so
+    # it's reliable even when the result line is lost. num_turns is populated
+    # only by the result line — fall back to counting assistant messages in
+    # raw_messages when it's None. (#531)
     tool_count = metadata.tool_count or 0
-    num_turns = metadata.num_turns or 0
+    if metadata.num_turns is not None:
+        num_turns = metadata.num_turns
+    elif raw_messages:
+        num_turns = sum(1 for m in raw_messages if m.get("type") == "assistant")
+    else:
+        num_turns = 0
+
     detail = (
         f"Execution completed without a result message after {tool_count} tool calls "
         f"/ {num_turns} turns (raw_messages={raw_message_count}). "
@@ -992,7 +1018,8 @@ async def execute_headless_task(
     timeout_seconds: int = 900,
     max_turns: Optional[int] = None,
     execution_id: Optional[str] = None,
-    resume_session_id: Optional[str] = None
+    resume_session_id: Optional[str] = None,
+    images: Optional[List[Dict]] = None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
     Execute Claude Code in headless mode for parallel task execution.
@@ -1077,6 +1104,12 @@ async def execute_headless_task(
             cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
             logger.info(f"[Headless Task] Guardrails disallow tools: {disallowed_tools}")
 
+        # #562: when images are present, use stream-json stdin format so images
+        # are delivered as proper vision content blocks, not base64 text strings.
+        if images:
+            cmd.extend(["--input-format", "stream-json"])
+            logger.info(f"[Headless Task] {len(images)} image(s) — switching to stream-json input")
+
         # Add system prompt if specified
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
@@ -1128,10 +1161,6 @@ async def execute_headless_task(
             "message_preview": prompt[:100],
             "pgid": process_pgid,
         })
-
-        # Write prompt to stdin and close it
-        process.stdin.write(prompt)
-        process.stdin.close()
 
         # Issue #285: Event to signal auth failure detected in stderr
         # When set, stdout loop should stop and process should be killed
@@ -1239,13 +1268,45 @@ async def execute_headless_task(
                     pass
 
         def read_subprocess_output_with_timeout():
-            """Runs in thread pool. Waits for subprocess with bounded timeout,
-            then drains reader threads (killing process-group stragglers if
-            they hold pipes open — Issue #407)."""
+            """Runs in thread pool. Writes stdin, starts reader threads, and
+            waits for subprocess with bounded timeout, then drains reader
+            threads (killing process-group stragglers if they hold pipes
+            open — Issue #407).
+
+            Stdin is written here (not in the async coroutine) so that:
+            1. Large payloads (e.g. base64 images) do not block the event loop.
+            2. Reader threads are active before the write, preventing pipe-
+               buffer deadlock if claude writes stdout before stdin is closed.
+            """
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
             stdout_thread = threading.Thread(target=_run_stdout, daemon=True)
             stderr_thread.start()
             stdout_thread.start()
+
+            # Build and write stdin payload. For vision tasks use stream-json
+            # format so images arrive as proper content blocks (#562).
+            if images:
+                content_blocks: List[Dict] = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["data"],
+                        },
+                    }
+                    for img in images
+                ]
+                content_blocks.append({"type": "text", "text": prompt})
+                stdin_payload = (
+                    json.dumps({"type": "user", "message": {"role": "user", "content": content_blocks}})
+                    + "\n"
+                )
+            else:
+                stdin_payload = prompt
+
+            process.stdin.write(stdin_payload)
+            process.stdin.close()
 
             # Bounded wait on the subprocess itself. If claude hangs, we
             # never wedge the executor thread for more than timeout_seconds.
@@ -1293,8 +1354,13 @@ async def execute_headless_task(
                     f"[Headless Task] Outer timeout on task {task_session_id} "
                     f"— killing process group as last resort"
                 )
-                _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
-                _safe_close_pipes(process)
+                # _terminate_process_group does up to 4s of process.wait() (SIGTERM grace + SIGKILL grace);
+                # off-load to the executor so the event loop stays responsive while we tear down.
+                await loop.run_in_executor(
+                    None,
+                    lambda: _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid),
+                )
+                await loop.run_in_executor(None, _safe_close_pipes, process)
                 raise HTTPException(
                     status_code=504,
                     detail=f"Task execution timed out after {timeout_seconds} seconds"
@@ -1411,7 +1477,7 @@ async def execute_headless_task(
             # the agent-server log misleadingly claims "completed successfully".
             # Surface this as 502 so backend records it as FAILED with a useful
             # diagnostic rather than dispatching an empty 200.
-            empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages))
+            empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages), raw_messages=raw_messages)
             if empty_result is not None:
                 status_code, detail = empty_result
                 logger.error(f"[Headless Task] {detail}")

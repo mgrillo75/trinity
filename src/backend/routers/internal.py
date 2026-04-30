@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 import logging
 
-from models import ActivityState, ActivityType
+from models import ActivityState, ActivityType, ShareFileRequest, ShareFileResponse
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -57,6 +57,27 @@ router = APIRouter(
 async def internal_health():
     """Internal health check for agent containers."""
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Scheduler pre-check (#454, SCHED-COND-001)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/agents/{agent_name}/pre-check")
+async def internal_agent_pre_check(agent_name: str):
+    """Run the agent's optional pre-check hook (SCHED-COND-001 / #454).
+
+    Thin passthrough — all logic lives in
+    ``services/pre_check_service.py`` (Invariant #1: Router → Service
+    → DB). See that module for the full contract.
+    """
+    from services.pre_check_service import run_pre_check, AgentNotFound
+
+    try:
+        return await run_pre_check(agent_name)
+    except AgentNotFound:
+        raise HTTPException(status_code=404, detail="Agent not found")
 
 
 @router.get("/agents/{agent_name}/sync-health-status")
@@ -501,3 +522,29 @@ async def log_audit_entry(request: InternalAuditRequest):
     except Exception as e:
         logger.error(f"Failed to log audit entry: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Agent Shared Files (outbound — FILES-001 Step 3)
+# =============================================================================
+
+@router.post("/agent-files/share", response_model=ShareFileResponse)
+async def agent_files_share(payload: ShareFileRequest):
+    """
+    Mint a public download URL for a file the agent wrote to its publish dir.
+
+    Authentication: X-Internal-Secret (already enforced by router dependency).
+    Agent identity: carried by `payload.agent_name`. The agent server is
+    responsible for passing its own name here — same trust model as
+    /internal/execute-task (forging requires the internal secret).
+    """
+    from services.agent_shared_files_service import create_share
+
+    result = await create_share(
+        agent_name=payload.agent_name,
+        filename=payload.filename,
+        display_name=payload.display_name,
+        expires_in=payload.expires_in,
+        created_by=payload.agent_name,
+    )
+    return ShareFileResponse(**result)

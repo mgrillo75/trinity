@@ -1,5 +1,10 @@
 <template>
-  <div class="relative bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-xl shadow-lg p-3">
+  <div
+    class="relative bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-xl shadow-lg p-3"
+    @dragover.prevent="dragOver = true"
+    @dragleave="dragOver = false"
+    @drop.prevent="onDrop"
+  >
 
     <!-- ── Autocomplete Dropdown (appears above input) ──────────────────── -->
     <Transition
@@ -77,8 +82,44 @@
       </div>
     </Transition>
 
+    <!-- ── File preview chips ────────────────────────────────────────────── -->
+    <div v-if="pendingFiles.length > 0" class="flex flex-wrap gap-1 mb-2">
+      <div
+        v-for="(f, idx) in pendingFiles"
+        :key="idx"
+        class="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs rounded-full"
+      >
+        <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+        </svg>
+        <span class="max-w-[120px] truncate">{{ f.name }}</span>
+        <button type="button" @click="removeFile(idx)" class="ml-0.5 hover:text-red-500 transition-colors" title="Remove">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Drag-over overlay ──────────────────────────────────────────────── -->
+    <div
+      v-if="dragOver"
+      class="absolute inset-0 rounded-xl bg-indigo-50/90 dark:bg-indigo-900/60 border-2 border-dashed border-indigo-400 flex items-center justify-center z-20 pointer-events-none"
+    >
+      <span class="text-indigo-600 dark:text-indigo-300 text-sm font-medium">Drop files here</span>
+    </div>
+
     <!-- ── Input row ─────────────────────────────────────────────────────── -->
     <form @submit.prevent="handleSubmit" class="flex items-end space-x-2">
+      <!-- Hidden file input -->
+      <input
+        ref="fileInputRef"
+        type="file"
+        multiple
+        accept="image/*,text/*,application/json,application/csv,.csv,.txt,.json,.py,.js,.ts,.md,.yaml,.yml"
+        class="hidden"
+        @change="onFileInputChange"
+      />
 
       <!-- Ghost text + textarea wrapper -->
       <div ref="inputWrapperRef" class="flex-1 relative">
@@ -109,6 +150,19 @@
         ></textarea>
       </div>
 
+      <!-- Paperclip / attach button -->
+      <button
+        type="button"
+        @click="fileInputRef?.click()"
+        :disabled="disabled || pendingFiles.length >= 3"
+        class="p-2 rounded-lg transition-colors shrink-0 bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/30 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-40"
+        title="Attach files (max 3, 5 MB each)"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+        </svg>
+      </button>
+
       <!-- Voice button (VOICE-004) -->
       <button
         v-if="voiceAvailable"
@@ -129,7 +183,7 @@
       <!-- Send button -->
       <button
         type="submit"
-        :disabled="disabled || !localMessage.trim()"
+        :disabled="disabled || (!localMessage.trim() && pendingFiles.length === 0)"
         class="p-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-lg transition-colors shrink-0"
       >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -165,9 +219,12 @@
 </template>
 
 <script setup>
-import { ref, watch, computed, onMounted } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { usePlaybookAutocomplete } from '../../composables/usePlaybookAutocomplete'
 import { useAuthStore } from '../../stores/auth'
+
+const MAX_FILES = 3
+const MAX_FILE_BYTES = 5 * 1024 * 1024  // 5 MB
 
 const props = defineProps({
   modelValue: {
@@ -212,6 +269,9 @@ const ac = usePlaybookAutocomplete()
 const localMessage = ref(props.modelValue)
 const textareaRef = ref(null)
 const inputWrapperRef = ref(null)
+const fileInputRef = ref(null)
+const pendingFiles = ref([])   // [{name, mimetype, size, data_base64}]
+const dragOver = ref(false)
 
 // Hide the default placeholder text while the dropdown/ghost hint is active
 const showPlaceholder = computed(() => !ac.showDropdown.value && !ac.activeArgHint.value)
@@ -340,12 +400,56 @@ function autoResize(textarea) {
   textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px'
 }
 
+// ── File handling ─────────────────────────────────────────────────────────────
+function encodeFile(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onload = (e) => resolve(e.target.result)  // data: URI
+    reader.readAsDataURL(file)
+  })
+}
+
+async function addFiles(fileList) {
+  const remaining = MAX_FILES - pendingFiles.value.length
+  const toAdd = Array.from(fileList).slice(0, remaining)
+  for (const file of toAdd) {
+    if (file.size > MAX_FILE_BYTES) {
+      alert(`"${file.name}" exceeds the 5 MB limit and was skipped.`)
+      continue
+    }
+    const data_base64 = await encodeFile(file)
+    // Parse MIME from data: URI prefix (more reliable than file.type across browsers)
+    const mimeMatch = data_base64.match(/^data:([^;]+);/)
+    const mimetype = mimeMatch ? mimeMatch[1] : (file.type || 'application/octet-stream')
+    pendingFiles.value.push({ name: file.name, mimetype, size: file.size, data_base64 })
+  }
+}
+
+function onFileInputChange(event) {
+  addFiles(event.target.files)
+  event.target.value = ''  // reset so same file can be re-selected
+}
+
+function onDrop(event) {
+  dragOver.value = false
+  if (event.dataTransfer?.files?.length) {
+    addFiles(event.dataTransfer.files)
+  }
+}
+
+function removeFile(idx) {
+  pendingFiles.value.splice(idx, 1)
+}
+
 // ── Submit ────────────────────────────────────────────────────────────────────
 function handleSubmit() {
-  if (localMessage.value.trim() && !props.disabled) {
+  const hasMessage = localMessage.value.trim()
+  const hasFiles = pendingFiles.value.length > 0
+  if ((hasMessage || hasFiles) && !props.disabled) {
     ac.hide()
-    emit('submit', localMessage.value.trim())
+    emit('submit', localMessage.value.trim(), [...pendingFiles.value])
     localMessage.value = ''
+    pendingFiles.value = []
     if (textareaRef.value) {
       textareaRef.value.style.height = 'auto'
     }

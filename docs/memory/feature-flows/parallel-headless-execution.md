@@ -3,13 +3,14 @@
 > **Requirement**: 12.1 - Parallel Headless Execution
 > **Status**: Implemented
 > **Created**: 2025-12-22
-> **Updated**: 2026-04-26 (Issue #520 empty-result detection)
+> **Updated**: 2026-04-27 (#531: `drain_reader_threads` reordered to preserve kernel pipe buffer before close)
 > **Verified**: 2026-02-05
 
 ## Revision History
 
 | Date | Changes |
 |------|---------|
+| 2026-04-27 | **Issue #531 - drain_reader_threads closes stdout pipe before reader can drain backlog**: Root cause of the HTTP 502 "Execution completed without a result message" on long agentic tasks (>5 min, dozens of tool calls). In `drain_reader_threads` (`subprocess_pgroup.py`), the old sequence was: kill grandchildren → `safe_close_pipes()` → join reader (2s). Closing the read end of the pipe before the reader finished discarded the kernel pipe buffer — including the final `{"type":"result"}` JSON line written by claude just before exit. This caused `metadata.cost_usd` and `metadata.duration_ms` to stay `None`, which #521's `_classify_empty_result` correctly identified as a 502. Fix: reorder to kill grandchildren → join reader with `post_kill_grace=30s` (natural drain: grandchildren dead → kernel delivers EOF → reader sees buffered tail → exits cleanly) → `safe_close_pipes()` only as a last resort for genuine wedges. Also: `_classify_empty_result(metadata, raw_message_count, raw_messages)` now accepts `raw_messages` list and derives `num_turns` from it when `metadata.num_turns is None` (which is the case when the result line is lost), so the 502 detail shows an honest turn count. `metadata.tool_count` is accumulated per-message during parsing (not from the result line) and remains reliable. New parameter `post_kill_grace=30` added to `drain_reader_threads`; all call sites use the default. Regression test: `test_buffered_data_preserved_after_grandchild_kill` in `tests/unit/test_subprocess_pgroup.py`. Related: #520 (symptom), #521 (502 classification), #523 (FD_CLOEXEC complement, future). |
 | 2026-04-26 | **Issue #520 - Empty-result misreported as success**: When the claude subprocess exits cleanly (`return_code == 0`) but the final `{"type":"result"}` JSON line is dropped before the reader thread captures it (typical cause: a child subprocess inherited stdout, kept the pipe open past claude exit, the reader thread leaked, the pgroup unwind closed the pipe and the result line went with it), `metadata.cost_usd` and `metadata.duration_ms` stay `None`. The success path used to return HTTP 200 anyway — agent-server logged "completed successfully" while backend silently reaped the execution as an orphan minutes later, masking the real failure with a misleading "completed on agent but recovered by watchdog" message. Sibling of #516 (signal-kill path). Added `_classify_empty_result(metadata, raw_message_count)` (`claude_code.py:935-980`) consulted *after* the `return_code != 0` block (#516 + auth heuristics) and *before* response building; when both `cost_usd` and `duration_ms` are `None`, raises HTTP 502 with diagnostic context (tool count, turn count, raw_messages, cause hint). Backend's auth classifier only triggers on 503, so 502 flows through as plain FAILED with the helpful detail preserved — no backend changes. The two-field check is conservative: single-field nullability could be a Claude format quirk; both-None is a strong signal that the terminal `result` message never arrived. 9 unit tests in `tests/unit/test_empty_result_classification.py`. |
 | 2026-04-26 | **Issue #516 - Signal kills misclassified as auth failure**: External signal terminations of the claude subprocess (timeout SIGKILL, OOM-kill, parent SIGTERM, operator cancel) used to fall into the auth-fallback heuristics at `claude_code.py:1262-1278` and surface as a misleading "Subscription token may be expired" 503 — same shape as #361 but a different exit path. Added `_classify_signal_exit(return_code, metadata)` helper (`claude_code.py:882-931`) consulted *before* the auth heuristics; it matches Python-native signal exits (`return_code < 0`) and shell-encoded forms (`130, 137, 143` for SIGINT/SIGKILL/SIGTERM) and raises HTTP 504 with a clear "killed by SIGKILL/SIGTERM/SIGINT — likely timeout, OOM, or operator cancel" message. Tightened the zero-token heuristic with `return_code > 0` so signal exits cannot reach it. Backend's `task_execution_service.py:542` only flags AUTH on 503, so 504 falls through to the generic FAILED path — no backend changes needed. The bug became routinely reproducible after #61 (PR #326) added backend-driven `terminate_execution_on_agent()` which makes signal-killed claude subprocesses the common case for any timeout. 21 unit tests in `tests/unit/test_signal_exit_classification.py`. |
 | 2026-04-26 | **Issue #498 - Sync long-poll on backlog**: Sync `/task` calls (`async_mode=false`) at capacity used to fail terminally with HTTP 429. They now spill to the same persistent backlog (BACKLOG-001) the async path uses and long-poll on the open HTTP connection until the queued execution reaches a terminal status. Total connection hold capped at `2 × effective_timeout` (queue wait + execution). Router (`chat.py:1007-1144`) pre-acquires the slot mirroring the async path, then on at-capacity calls `backlog.enqueue()` followed by `wait_for_sync_terminal()`. New module `services/sync_waiter.py` owns the in-process registry, `signal_sync_waiter()`, and `wait_for_sync_terminal()` (event + 5s DB-poll fallback). The drain reuses `_run_async_task_with_persistence` unchanged — it now calls `signal_sync_waiter` from its `finally` block to wake any sync waiter. See [persistent-task-backlog.md](persistent-task-backlog.md) for the full backlog flow. |
@@ -561,9 +562,14 @@ Note: Async mode on the `/api/agents/{name}/task` endpoint does **not** use `Tas
 class ParallelTaskRequest(BaseModel):
     # ... existing fields ...
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id
+    files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
 ```
 
-**Background Task Handler** (`src/backend/routers/chat.py:438-650`):
+**File upload** (#364): `execute_parallel_task` decodes files synchronously (before async/sync fork)
+via `upload_service.process_file_uploads()`. Images become vision blocks in `execute_task(images=)`;
+text files are written to `/home/developer/uploads/{user_id}/` before the execution ID is returned.
+
+**Background Task Handler** (`src/backend/routers/chat.py:608-800`):
 ```python
 async def _run_async_task_with_persistence(
     agent_name: str,
@@ -576,6 +582,7 @@ async def _run_async_task_with_persistence(
     subscription_id: Optional[str] = None,
     is_self_task: bool = False,
     self_task_activity_id: Optional[str] = None,
+    images: Optional[list] = None,  # (#364) pre-decoded vision blocks
 ):
     """
     Async /task background wrapper (issue #95).

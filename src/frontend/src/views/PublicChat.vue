@@ -10,18 +10,27 @@
             <img src="../assets/trinity-logo-white.svg" alt="Trinity" class="h-6 w-6 mr-2 hidden dark:block" />
             <span class="text-lg font-bold text-gray-900 dark:text-white">Trinity</span>
           </div>
-          <!-- New Conversation button (moved to top right) -->
-          <button
-            v-if="messages.length > 0 && isVerified && linkInfo?.valid"
-            @click="confirmNewConversation"
-            class="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
-            :disabled="chatLoading"
-          >
-            <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            New
-          </button>
+          <!-- Header action buttons -->
+          <div class="flex items-center gap-1">
+            <!-- Chat history dropdown (logged-in users only) -->
+            <ChatHistoryDropdown
+              v-if="authStore.isAuthenticated && linkInfo?.valid"
+              :token="token"
+              @session-selected="handleHistorySessionSelected"
+            />
+            <!-- New Conversation button -->
+            <button
+              v-if="messages.length > 0 && isVerified && linkInfo?.valid"
+              @click="confirmNewConversation"
+              class="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
+              :disabled="chatLoading"
+            >
+              <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              New
+            </button>
+          </div>
         </div>
 
         <!-- Agent info row -->
@@ -197,6 +206,22 @@
 
       <!-- Chat interface -->
       <div v-else class="flex-1 flex flex-col">
+        <!-- Read-only history banner -->
+        <div
+          v-if="viewingHistorySession"
+          class="mb-3 px-3 py-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg flex items-center justify-between text-xs"
+        >
+          <span class="text-amber-700 dark:text-amber-400">
+            Viewing past session — read only
+          </span>
+          <button
+            @click="exitHistoryView"
+            class="ml-2 text-amber-700 dark:text-amber-400 underline hover:no-underline"
+          >
+            Return to current chat
+          </button>
+        </div>
+
         <!-- Messages area using shared component -->
         <ChatMessages
           ref="messagesRef"
@@ -235,13 +260,25 @@
           </template>
         </ChatMessages>
 
+        <!-- Quick-action buttons (#363) — render alongside intro until first user message -->
+        <ChatEmptyState
+          v-if="showQuickActions"
+          :playbooks="playbooks"
+          :show-icon="false"
+          heading=""
+          subheading=""
+          @select="onEmptyStateSelect"
+          class="mb-2"
+        />
+
         <!-- Error message -->
         <div v-if="chatError" class="mb-4 p-3 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
           <p class="text-sm text-red-600 dark:text-red-400">{{ chatError }}</p>
         </div>
 
-        <!-- Input area using shared component -->
+        <!-- Input area (hidden when viewing a read-only history session) -->
         <ChatInput
+          v-if="!viewingHistorySession"
           v-model="message"
           :disabled="chatLoading"
           :public-token="token"
@@ -257,11 +294,13 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
-import { ChatMessages, ChatInput } from '../components/chat'
+import { ChatMessages, ChatInput, ChatEmptyState, ChatHistoryDropdown } from '../components/chat'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
+import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const token = computed(() => route.params.token)
+const authStore = useAuthStore()
 
 // State
 const loading = ref(true)
@@ -281,6 +320,9 @@ const isVerified = computed(() => !linkInfo.value?.require_email || !!sessionTok
 const chatSessionId = ref(localStorage.getItem(`public_chat_session_id_${token.value}`) || '')
 const historyLoading = ref(false)
 
+// Read-only history view (when a past session is loaded from ChatHistoryDropdown)
+const viewingHistorySession = ref(null)
+
 // Chat
 const message = ref('')
 const messages = ref([])
@@ -299,6 +341,26 @@ let streamReader = null
 const introLoading = ref(false)
 const introError = ref(null)
 const introFetched = ref(false)
+
+// Playbooks (for empty-state quick actions)
+const playbooks = ref([])
+const userMessageCount = computed(() => messages.value.filter(m => m.role === 'user').length)
+const showQuickActions = computed(() => userMessageCount.value === 0 && !introLoading.value)
+const loadPlaybooks = async () => {
+  try {
+    const response = await axios.get(`/api/public/playbooks/${token.value}`)
+    playbooks.value = response.data.skills || []
+  } catch {
+    playbooks.value = []
+  }
+}
+const onEmptyStateSelect = ({ text, sendImmediately }) => {
+  if (sendImmediately) {
+    sendMessage(text)
+  } else {
+    message.value = text
+  }
+}
 
 // Load link info
 const loadLinkInfo = async () => {
@@ -523,6 +585,26 @@ const confirmNewConversation = async () => {
   }
 }
 
+// Load a past session in read-only view (from ChatHistoryDropdown)
+const handleHistorySessionSelected = ({ messages: sessionMessages, session }) => {
+  viewingHistorySession.value = session
+  messages.value = sessionMessages
+  chatError.value = null
+}
+
+// Exit read-only history view and return to live chat
+const exitHistoryView = async () => {
+  viewingHistorySession.value = null
+  messages.value = []
+  introFetched.value = false
+  const hasHistory = await loadHistory()
+  if (!hasHistory) {
+    await fetchIntro()
+  } else {
+    introFetched.value = true
+  }
+}
+
 // THINK-001: Update loading text with minimum display time to prevent flicker
 const updateLoadingText = (newText) => {
   if (!newText) return
@@ -660,8 +742,8 @@ const pollExecution = async (executionId) => {
 }
 
 // Send chat message
-const sendMessage = async (userMessage) => {
-  if (!userMessage || chatLoading.value) return
+const sendMessage = async (userMessage, files = []) => {
+  if ((!userMessage && files.length === 0) || chatLoading.value) return
 
   chatError.value = null
 
@@ -680,7 +762,8 @@ const sendMessage = async (userMessage) => {
   try {
     const payload = {
       message: userMessage,
-      async_mode: true
+      async_mode: true,
+      files: files.length > 0 ? files : undefined,
     }
 
     // Include session token if email verification was required
@@ -766,6 +849,8 @@ onMounted(async () => {
       } else {
         introFetched.value = true // Mark intro as done since we have history
       }
+
+      loadPlaybooks()
     }
   }
 })

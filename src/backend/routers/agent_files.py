@@ -24,6 +24,14 @@ from services.agent_service import (
     preview_agent_file_logic,
     update_agent_file_logic,
     get_agent_metrics_logic,
+    get_file_sharing_status_logic,
+    set_file_sharing_status_logic,
+)
+from models import ShareFileMcpRequest, ShareFileResponse, SharedFileInfo, SharedFilesList
+from services.agent_shared_files_service import (
+    create_share,
+    build_download_url,
+    MAX_AGENT_QUOTA_BYTES,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -367,3 +375,160 @@ async def get_folder_consumers(
 ):
     """Get list of agents that can consume this agent's shared folder."""
     return await get_folder_consumers_logic(agent_name, current_user)
+
+
+# ============================================================================
+# File Sharing (outbound) Endpoints — FILES-001 Step 2
+# ============================================================================
+
+
+@router.get("/{agent_name}/file-sharing")
+async def get_agent_file_sharing(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get the outbound file-sharing status for an agent.
+
+    Returns:
+    - enabled: bool — whether the toggle is on
+    - volume_attached: bool — whether /home/developer/public is currently mounted
+    - restart_required: bool — true when enabled != volume_attached
+    - file_count / total_bytes / quota_bytes — placeholder zeros in Step 2;
+      wired to agent_shared_files in Step 3
+    """
+    return await get_file_sharing_status_logic(agent_name, current_user)
+
+
+@router.put("/{agent_name}/file-sharing")
+async def set_agent_file_sharing(
+    agent_name: str,
+    body: dict,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Enable or disable outbound file sharing for an agent (owner-only).
+
+    Body:
+    - enabled: True/False
+
+    Flipping the flag does NOT mount/unmount immediately — it sets
+    restart_required. The next stop/start cycle triggers container
+    recreation with the correct volume configuration.
+    """
+    return await set_file_sharing_status_logic(agent_name, body, current_user)
+
+
+@router.post(
+    "/{agent_name}/shared-files",
+    response_model=ShareFileResponse,
+    status_code=201,
+)
+async def share_agent_file(
+    agent_name: str,
+    body: ShareFileMcpRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Mint a public download URL for a file the agent has written to its
+    publish dir (/home/developer/public/). Called by the `share_file`
+    MCP tool.
+
+    Auth: owner/admin of the agent, OR agent-scoped MCP key whose
+    agent_name matches the path. User-scoped MCP keys of non-owners
+    are rejected.
+    """
+    # Owner gate (the agent's owner always passes)
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the owner or admin can share files from this agent.",
+        )
+
+    # Defense in depth: if this is an agent-scoped key, it must be for
+    # the same agent. Prevents Agent A's key from being used to share
+    # files from Agent B's volume even when both are owned by the same user.
+    actor_agent = getattr(current_user, "agent_name", None)
+    if actor_agent and actor_agent != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped MCP key cannot share files for a different agent.",
+        )
+
+    result = await create_share(
+        agent_name=agent_name,
+        filename=body.filename,
+        display_name=body.display_name,
+        expires_in=body.expires_in,
+        created_by=actor_agent or current_user.username,
+    )
+    return ShareFileResponse(**result)
+
+
+@router.get(
+    "/{agent_name}/shared-files",
+    response_model=SharedFilesList,
+)
+async def list_agent_shared_files(
+    agent_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List active (non-revoked, non-expired) shared files for an agent.
+    Restricted to owner + admin (C7) — the list includes full download
+    URLs with tokens, so anyone who can see the list can effectively
+    reuse the shares. That's a capability that belongs with `share_file`
+    and `revoke` (both owner-only), not with shared-user read access.
+    """
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only the owner or admin can view shared files")
+
+    rows = db.list_active_shared_files_for_agent(agent_name)
+    files = [
+        SharedFileInfo(
+            file_id=row["id"],
+            filename=row["filename"],
+            size_bytes=row["size_bytes"],
+            mime_type=row["mime_type"],
+            url=build_download_url(row["id"], row["download_token"]),
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            download_count=row["download_count"] or 0,
+            last_downloaded_at=row["last_downloaded_at"],
+        )
+        for row in rows
+    ]
+    total_bytes = db.total_shared_file_bytes_for_agent(agent_name)
+    return SharedFilesList(
+        agent_name=agent_name,
+        files=files,
+        total_bytes=total_bytes,
+        quota_bytes=MAX_AGENT_QUOTA_BYTES,
+    )
+
+
+@router.delete(
+    "/{agent_name}/shared-files/{file_id}",
+    status_code=204,
+)
+async def revoke_agent_shared_file(
+    agent_name: str,
+    file_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Revoke a shared file. Owner/admin only. Idempotent — revoking a
+    revoked or missing file returns 204 either way.
+    """
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only the owner can revoke shares")
+
+    row = db.get_agent_shared_file(file_id)
+    if row and row["agent_name"] != agent_name:
+        # Preventing cross-agent revoke via URL manipulation
+        raise HTTPException(status_code=404, detail="File not found for this agent")
+
+    db.revoke_agent_shared_file(file_id)
+    return None

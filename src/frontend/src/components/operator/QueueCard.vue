@@ -208,14 +208,14 @@ function submitAnswer() {
 }
 
 function optionClass(idx) {
-  if (idx === 0) return 'border-green-500 bg-green-50 text-green-700 dark:border-green-400 dark:bg-green-900/20 dark:text-green-300'
-  if (idx === 1) return 'border-red-500 bg-red-50 text-red-700 dark:border-red-400 dark:bg-red-900/20 dark:text-red-300'
+  if (idx === 0) return 'border-status-success-500 bg-status-success-50 text-status-success-700 dark:border-status-success-400 dark:bg-status-success-900/20 dark:text-status-success-300'
+  if (idx === 1) return 'border-status-danger-500 bg-status-danger-50 text-status-danger-700 dark:border-status-danger-400 dark:bg-status-danger-900/20 dark:text-status-danger-300'
   return 'border-blue-500 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-900/20 dark:text-blue-300'
 }
 
 function typePill(type) {
   return {
-    approval: 'bg-purple-50 text-purple-600 dark:bg-purple-900/20 dark:text-purple-400',
+    approval: 'bg-accent-purple-50 text-accent-purple-600 dark:bg-accent-purple-900/20 dark:text-accent-purple-400',
     question: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400',
     alert: 'bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400'
   }[type] || ''
@@ -227,8 +227,8 @@ function typeLabel(type) {
 
 function priorityPill(priority) {
   return {
-    critical: 'bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400',
-    high: 'bg-orange-50 text-orange-600 dark:bg-orange-900/20 dark:text-orange-400'
+    critical: 'bg-status-danger-50 text-status-danger-600 dark:bg-status-danger-900/20 dark:text-status-danger-400',
+    high: 'bg-status-urgent-50 text-status-urgent-600 dark:bg-status-urgent-900/20 dark:text-status-urgent-400'
   }[priority] || ''
 }
 

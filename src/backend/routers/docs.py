@@ -6,10 +6,13 @@ Provides endpoints for:
 - Serving markdown content
 - Documentation index
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 import json
+
+from models import User
+from dependencies import get_current_user
 
 router = APIRouter(prefix="/api/docs", tags=["Documentation"])
 
@@ -31,7 +34,7 @@ def get_docs_dir() -> Path:
 
 
 @router.get("/index")
-async def get_docs_index():
+async def get_docs_index(current_user: User = Depends(get_current_user)):
     """Get documentation index/navigation structure."""
     docs_dir = get_docs_dir()
     if not docs_dir:
@@ -49,7 +52,10 @@ async def get_docs_index():
 
 
 @router.get("/content/{slug:path}")
-async def get_doc_content(slug: str):
+async def get_doc_content(
+    slug: str,
+    current_user: User = Depends(get_current_user),
+):
     """Get documentation content by slug (supports .md and .json files)."""
     docs_dir = get_docs_dir()
     if not docs_dir:
@@ -100,7 +106,7 @@ async def get_doc_content(slug: str):
 
 
 @router.get("/list")
-async def list_docs():
+async def list_docs(current_user: User = Depends(get_current_user)):
     """List all available documentation files."""
     docs_dir = get_docs_dir()
     if not docs_dir:

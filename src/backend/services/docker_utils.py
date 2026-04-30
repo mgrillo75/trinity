@@ -225,6 +225,24 @@ async def container_exec_run(
     return await loop.run_in_executor(_docker_executor, _exec)
 
 
+async def container_get_archive(container, path: str) -> tuple:
+    """Read a tar archive out of a container without blocking the event loop.
+
+    Args:
+        container: Docker container object
+        path: Source path inside the container
+
+    Returns:
+        (stream_generator, stat_dict) matching docker-py's return shape.
+        Raises docker.errors.NotFound when the path doesn't exist.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _docker_executor,
+        lambda: container.get_archive(path),
+    )
+
+
 async def container_put_archive(container, path: str, data: bytes) -> bool:
     """Write a tar archive into a container without blocking the event loop.
 

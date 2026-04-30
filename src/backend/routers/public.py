@@ -12,7 +12,7 @@ import secrets
 import httpx
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -26,12 +26,15 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
+from dependencies import get_current_user
+from models import User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import format_user_memory_block
 from services.settings_service import get_anthropic_api_key
+from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 
 
 class PublicChatHistoryResponse(BaseModel):
@@ -487,6 +490,42 @@ async def public_chat(
             detail="Agent is not available. Please try again later."
         )
 
+    # (#364) File upload processing for public chat.
+    # Rate-limited by existing IP check above. Files must be processed
+    # synchronously before the async/sync fork so bytes are in the container.
+    _pub_image_data: list = []
+    _pub_file_descs: list = []
+    if chat_request.files:
+        uploader = verified_email or f"anonymous ({client_ip})"
+        raw_files = [
+            {
+                "name": f.name,
+                "mimetype": f.mimetype,
+                "size": f.size,
+                "data": decode_web_file(f.dict()),
+                "id": f"f{i}",
+            }
+            for i, f in enumerate(chat_request.files)
+        ]
+        file_descs, _, all_writes_failed, _pub_image_data = await process_file_uploads(
+            raw_files=raw_files,
+            agent_name=agent_name,
+            container=container,
+            session_id=session_identifier,
+            uploader=uploader,
+            source="public",
+            max_files=WEB_MAX_FILES,
+            max_file_size=WEB_MAX_FILE_SIZE,
+            max_image_size=WEB_MAX_IMAGE_SIZE,
+            max_total_image_size=WEB_MAX_TOTAL_IMAGE_SIZE,
+        )
+        if all_writes_failed:
+            raise HTTPException(
+                status_code=502,
+                detail="File upload failed: could not write to agent workspace."
+            )
+        _pub_file_descs = file_descs
+
     # Get or create chat session
     chat_session = db.get_or_create_public_chat_session(
         link_id=link["id"],
@@ -494,7 +533,19 @@ async def public_chat(
         identifier_type=identifier_type
     )
 
-    # Store user message
+    # Build context from prior history before storing the new user message.
+    # Must happen first — storing the user message then reading it back would
+    # include the current message in both "Previous conversation:" and
+    # "Current message:", sending it to the agent twice on every turn.
+    context_prompt = db.build_public_chat_context(
+        session_id=chat_session.id,
+        new_message=chat_request.message,
+        max_turns=10
+    )
+    if _pub_file_descs:
+        context_prompt = f"{context_prompt}\n\n" + "\n".join(_pub_file_descs)
+
+    # Store user message (after context is built so it doesn't appear twice)
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="user",
@@ -506,13 +557,6 @@ async def public_chat(
         link_id=link["id"],
         email=verified_email,
         ip_address=client_ip
-    )
-
-    # Build context-enriched prompt with conversation history
-    context_prompt = db.build_public_chat_context(
-        session_id=chat_session.id,
-        new_message=chat_request.message,
-        max_turns=10
     )
 
     # MEM-001: Fetch per-user memory for email-verified sessions and inject into system prompt
@@ -550,6 +594,7 @@ async def public_chat(
             identifier_type=identifier_type,
             verified_email=verified_email,
             memory_system_prompt=memory_system_prompt,
+            images=_pub_image_data,
         ))
 
         return {
@@ -568,6 +613,7 @@ async def public_chat(
         source_user_email=source_email,
         timeout_seconds=900,
         system_prompt=memory_system_prompt,
+        images=_pub_image_data,
     )
 
     if result.status == "failed":
@@ -866,6 +912,7 @@ async def _execute_public_chat_background(
     identifier_type: str,
     verified_email: str = None,
     memory_system_prompt: str = None,
+    images: list = None,
 ):
     """
     Background task for async public chat execution.
@@ -884,6 +931,7 @@ async def _execute_public_chat_background(
             timeout_seconds=900,
             execution_id=execution_id,
             system_prompt=memory_system_prompt,
+            images=images or [],
         )
 
         if result.status == "success" and result.response:
@@ -1071,4 +1119,75 @@ async def public_execution_status(
         "status": execution.status,
         "response": execution.response if execution.status in ("success", "failed") else None,
         "error": execution.error if execution.status == "failed" else None,
+    }
+
+
+@router.get("/sessions/{token}")
+async def get_public_link_sessions(
+    token: str,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    List the authenticated user's chat sessions for the agent behind this public link.
+
+    Requires JWT. Returns the caller's own sessions ordered most-recent first,
+    capped at `limit` (default 20). Does not require agent sharing — the public
+    link token acts as the access credential for this read-only history view.
+    """
+    link = _validate_public_link(token)
+    agent_name = link["agent_name"]
+
+    sessions = db.get_agent_chat_sessions(
+        agent_name=agent_name,
+        user_id=current_user.id,
+    )
+    page = sessions[:limit]
+
+    result = []
+    for s in page:
+        entry = s.model_dump()
+        # Attach a preview from the most recent message in the session
+        recent = db.get_chat_messages(s.id, limit=1)
+        entry["preview"] = recent[0].content[:120] if recent else None
+        result.append(entry)
+
+    return {
+        "session_count": len(result),
+        "sessions": result,
+    }
+
+
+@router.get("/sessions/{token}/{session_id}")
+async def get_public_link_session_detail(
+    token: str,
+    session_id: str,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get messages for a specific chat session via a public link token.
+
+    Requires JWT. The session must belong to the authenticated user and to
+    the agent referenced by the public link token.
+    """
+    link = _validate_public_link(token)
+    agent_name = link["agent_name"]
+
+    session = db.get_chat_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Session does not belong to this agent")
+
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You don't have access to this session")
+
+    messages = db.get_chat_messages(session_id, limit=limit)
+
+    return {
+        "session": session.model_dump(),
+        "message_count": len(messages),
+        "messages": [m.model_dump() for m in messages],
     }

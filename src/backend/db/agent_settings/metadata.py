@@ -205,6 +205,14 @@ class MetadataMixin:
                     (new_name, old_name)
                 )
 
+                # Shared files (outbound — amazing-file-outbound).
+                # FK has ON UPDATE CASCADE as belt-and-suspenders; this keeps
+                # the explicit cascade list complete for visibility.
+                cursor.execute(
+                    "UPDATE agent_shared_files SET agent_name = ? WHERE agent_name = ?",
+                    (new_name, old_name)
+                )
+
                 conn.commit()
                 return True
 

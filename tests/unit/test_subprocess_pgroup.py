@@ -309,6 +309,87 @@ class TestDrainReaderThreads:
             except Exception:
                 pass
 
+    def test_buffered_data_preserved_after_grandchild_kill(self):
+        """Regression for #531: data in the kernel pipe buffer (including the
+        final result line) must not be lost when a grandchild is killed.
+
+        Old behavior: safe_close_pipes() was called immediately after
+        terminate_process_group(), causing readline() to raise ValueError and
+        discard the buffered tail. New behavior: we wait up to post_kill_grace
+        seconds for the reader to drain naturally before force-closing.
+
+        The subprocess writes a sentinel line ('RESULT_LINE') then spawns a
+        grandchild that holds stdout open. After the parent exits, the reader
+        is artificially slowed (simulating backlog processing). drain must
+        still surface the sentinel via natural drain, not lose it via early
+        close.
+        """
+        # Script: parent writes a result line then forks a grandchild that
+        # keeps stdout open. Parent exits; grandchild sleeps a while.
+        script = r"""
+import os, sys, time
+sys.stdout.write("RESULT_LINE\n")
+sys.stdout.flush()
+pid = os.fork()
+if pid == 0:
+    # Grandchild keeps stdout open
+    time.sleep(5)
+    os._exit(0)
+# Parent exits immediately
+sys.exit(0)
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        captured: list[str] = []
+        reader_ready = threading.Event()
+
+        def slow_reader():
+            reader_ready.set()
+            assert proc.stdout is not None
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if not line:
+                        break
+                    captured.append(line.strip())
+                    time.sleep(0.05)  # simulate slow processing
+            except (ValueError, OSError):
+                pass  # pipe closed by force — acceptable in the wedge path
+
+        t = threading.Thread(target=slow_reader, daemon=True)
+        t.start()
+        reader_ready.wait(timeout=2)
+
+        # Wait for parent to exit (grandchild still alive, holding stdout)
+        proc.wait(timeout=5)
+        # Reader is still alive because grandchild holds the pipe open.
+        time.sleep(0.1)
+
+        try:
+            # grace=0 forces the stuck-reader path immediately; post_kill_grace
+            # gives the natural-drain window.
+            drain_reader_threads(
+                proc, t,
+                grace=0,
+                post_kill_grace=5,
+                pgid=pgid,
+            )
+            assert not t.is_alive(), "reader thread should have exited after drain"
+            assert "RESULT_LINE" in captured, (
+                f"sentinel lost — captured={captured!r}. "
+                "drain_reader_threads closed pipe before reader drained buffer."
+            )
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+
 
 @pytest.mark.unit
 class TestSafeClosePipes:

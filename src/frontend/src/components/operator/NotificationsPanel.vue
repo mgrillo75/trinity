@@ -94,11 +94,11 @@
     <!-- Stats -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-3xl font-bold text-red-600 dark:text-red-400">{{ notificationsStore.pendingCount }}</div>
+        <div class="text-3xl font-bold text-status-danger-600 dark:text-status-danger-400">{{ notificationsStore.pendingCount }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Pending</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-3xl font-bold text-green-600 dark:text-green-400">{{ acknowledgedCount }}</div>
+        <div class="text-3xl font-bold text-status-success-600 dark:text-status-success-400">{{ acknowledgedCount }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Acknowledged</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
@@ -159,8 +159,8 @@
           :key="notification.id"
           class="px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
           :class="{
-            'bg-red-50 dark:bg-red-900/10': notification.status === 'pending' && notification.priority === 'urgent',
-            'bg-orange-50 dark:bg-orange-900/10': notification.status === 'pending' && notification.priority === 'high',
+            'bg-status-danger-50 dark:bg-status-danger-900/10': notification.status === 'pending' && notification.priority === 'urgent',
+            'bg-status-urgent-50 dark:bg-status-urgent-900/10': notification.status === 'pending' && notification.priority === 'high',
             'opacity-60': notification.status === 'dismissed'
           }"
         >
@@ -218,7 +218,7 @@
                 <span class="px-2 py-0.5 rounded" :class="getTypeBadge(notification.notification_type)">
                   {{ notification.notification_type }}
                 </span>
-                <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-green-600 dark:text-green-400">
+                <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-status-success-600 dark:text-status-success-400">
                   <CheckIcon class="w-3 h-3" />
                   Acknowledged
                 </span>
@@ -245,7 +245,7 @@
               <button
                 v-if="notification.status === 'pending'"
                 @click="acknowledge(notification.id)"
-                class="px-3 py-1.5 text-xs font-medium text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 border border-green-300 dark:border-green-700 rounded hover:bg-green-200 dark:hover:bg-green-900/50"
+                class="px-3 py-1.5 text-xs font-medium text-status-success-700 dark:text-status-success-300 bg-status-success-100 dark:bg-status-success-900/30 border border-status-success-300 dark:border-status-success-700 rounded hover:bg-status-success-200 dark:hover:bg-status-success-900/50"
                 title="Acknowledge"
               >
                 <CheckIcon class="w-4 h-4" />
@@ -491,9 +491,9 @@ function getTypeIcon(type) {
 
 function getPriorityIconBg(priority) {
   const classes = {
-    urgent: 'bg-red-100 dark:bg-red-900/30',
-    high: 'bg-orange-100 dark:bg-orange-900/30',
-    normal: 'bg-blue-100 dark:bg-blue-900/30',
+    urgent: 'bg-status-danger-100 dark:bg-status-danger-900/30',
+    high: 'bg-status-urgent-100 dark:bg-status-urgent-900/30',
+    normal: 'bg-status-info-100 dark:bg-status-info-900/30',
     low: 'bg-gray-100 dark:bg-gray-700',
   }
   return classes[priority] || 'bg-gray-100 dark:bg-gray-700'
@@ -501,9 +501,9 @@ function getPriorityIconBg(priority) {
 
 function getPriorityIconColor(priority) {
   const classes = {
-    urgent: 'text-red-600 dark:text-red-400',
-    high: 'text-orange-600 dark:text-orange-400',
-    normal: 'text-blue-600 dark:text-blue-400',
+    urgent: 'text-status-danger-600 dark:text-status-danger-400',
+    high: 'text-status-urgent-600 dark:text-status-urgent-400',
+    normal: 'text-status-info-600 dark:text-status-info-400',
     low: 'text-gray-600 dark:text-gray-400',
   }
   return classes[priority] || 'text-gray-600 dark:text-gray-400'
@@ -511,9 +511,9 @@ function getPriorityIconColor(priority) {
 
 function getPriorityBadge(priority) {
   const classes = {
-    urgent: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300',
-    high: 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300',
-    normal: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
+    urgent: 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300',
+    high: 'bg-status-urgent-100 dark:bg-status-urgent-900/30 text-status-urgent-700 dark:text-status-urgent-300',
+    normal: 'bg-status-info-100 dark:bg-status-info-900/30 text-status-info-700 dark:text-status-info-300',
     low: 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300',
   }
   return classes[priority] || 'bg-gray-100 text-gray-700'
@@ -521,19 +521,19 @@ function getPriorityBadge(priority) {
 
 function getTypeBadge(type) {
   const classes = {
-    alert: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300',
-    info: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
-    status: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300',
-    completion: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300',
-    question: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300',
+    alert: 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300',
+    info: 'bg-status-info-100 dark:bg-status-info-900/30 text-status-info-700 dark:text-status-info-300',
+    status: 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300',
+    completion: 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300',
+    question: 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300',
   }
   return classes[type] || 'bg-gray-100 text-gray-700'
 }
 
 function getStatusBadge(status) {
   const classes = {
-    pending: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300',
-    acknowledged: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300',
+    pending: 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300',
+    acknowledged: 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300',
     dismissed: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400',
   }
   return classes[status] || 'bg-gray-100 text-gray-700'

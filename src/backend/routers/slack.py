@@ -405,6 +405,10 @@ async def get_agent_slack_channel(
     for ws in workspaces:
         binding = db.get_slack_channel_for_agent(ws["team_id"], name)
         if binding:
+            # Count agents in the workspace so the UI can decide whether
+            # to allow unbinding — the DM-default agent cannot be unbound
+            # while other agents are still bound (#584).
+            workspace_agents = db.get_slack_agents_for_workspace(ws["team_id"])
             return {
                 "bound": True,
                 "channel_name": binding["slack_channel_name"],
@@ -412,6 +416,7 @@ async def get_agent_slack_channel(
                 "workspace_team_id": ws["team_id"],
                 "workspace_name": ws["team_name"],
                 "is_dm_default": binding.get("is_dm_default", False),
+                "workspace_agent_count": len(workspace_agents),
                 "created_at": binding.get("created_at"),
             }
 
@@ -490,14 +495,121 @@ async def delete_agent_slack_channel(
     name: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Unbind an agent from its Slack channel."""
+    """Unbind an agent from its Slack channel.
+
+    Refuses to unbind the workspace's current DM-default agent while any
+    other agents are still bound (#584). The owner must promote a different
+    agent first via ``PUT /api/agents/{name}/slack/channel/dm-default``.
+    When the agent is the only one bound, unbind is allowed — the workspace
+    ends up with no Slack agents, which is a clean cascade.
+    """
     if not db.can_user_share_agent(current_user.username, name):
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     workspaces = db.get_all_slack_workspaces()
     for ws in workspaces:
+        binding = db.get_slack_channel_for_agent(ws["team_id"], name)
+        if not binding:
+            continue
+
+        # Refuse to drop the DM default while siblings remain.
+        if binding.get("is_dm_default"):
+            workspace_agents = db.get_slack_agents_for_workspace(ws["team_id"])
+            if len(workspace_agents) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cannot unbind the DM-default agent while other agents "
+                        "are bound to this workspace. Set another agent as DM "
+                        "default first (PUT /api/agents/{other}/slack/channel/"
+                        "dm-default) and try again."
+                    ),
+                )
+
         if db.unbind_slack_agent(ws["team_id"], name):
             logger.info(f"Agent {name} unbound from Slack in workspace {ws['team_name']}")
             return {"unbound": True, "workspace_name": ws["team_name"]}
 
     raise HTTPException(status_code=404, detail="Agent is not bound to any Slack channel")
+
+
+@auth_router.put("/api/agents/{name}/slack/channel/dm-default")
+async def set_agent_as_slack_dm_default(
+    name: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Make this agent the DM-default for its Slack workspace.
+
+    DMs to the bot (no channel context, no @mention) route to whichever
+    agent in the workspace is flagged ``is_dm_default=1``. Until #584 the
+    flag was only auto-set for the first agent ever connected and had no
+    setter, so workspaces with multiple agents were stuck. This endpoint
+    flips it; ``unbind`` auto-promotes the oldest remaining agent so the
+    workspace is never left with zero defaults.
+    """
+    if not db.can_user_share_agent(current_user.username, name):
+        raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
+
+    # Find the workspace where this agent is bound. There should be at
+    # most one — agents are bound 1:1 per workspace today.
+    workspace = None
+    for ws in db.get_all_slack_workspaces():
+        if db.get_slack_channel_for_agent(ws["team_id"], name):
+            workspace = ws
+            break
+
+    if not workspace:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent is not bound to any Slack channel",
+        )
+
+    team_id = workspace["team_id"]
+    previous = db.get_slack_dm_default_agent(team_id)
+    if previous == name:
+        # Idempotent — already the default.
+        return {
+            "status": "unchanged",
+            "team_id": team_id,
+            "workspace_name": workspace.get("team_name"),
+            "previous": previous,
+            "new_default": name,
+        }
+
+    if not db.set_slack_dm_default(team_id, name):
+        # set_dm_default returns False only if the agent isn't bound — we
+        # already verified that above, so this is a real "row vanished"
+        # race. Surface as 404.
+        raise HTTPException(status_code=404, detail="Agent binding not found")
+
+    logger.info(
+        "Slack DM default for workspace %s changed: %s → %s (by %s)",
+        workspace.get("team_name"), previous, name, current_user.username,
+    )
+
+    # Audit
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AGENT_LIFECYCLE,
+            event_action="slack_dm_default_changed",
+            source="api",
+            actor_user=current_user,
+            target_type="agent",
+            target_id=name,
+            details={
+                "team_id": team_id,
+                "workspace_name": workspace.get("team_name"),
+                "previous": previous,
+                "new_default": name,
+            },
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("Failed to audit slack_dm_default_changed: %s", e)
+
+    return {
+        "status": "updated",
+        "team_id": team_id,
+        "workspace_name": workspace.get("team_name"),
+        "previous": previous,
+        "new_default": name,
+    }

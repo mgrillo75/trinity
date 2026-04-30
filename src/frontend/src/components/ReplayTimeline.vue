@@ -326,7 +326,8 @@
                 class="transition-all duration-300 cursor-pointer hover:opacity-90 hover:stroke-white hover:stroke-2"
                 @click="navigateToExecution(activity)"
               >
-                <title>{{ getBarTooltip(activity) }} (Click to open in new tab)</title>
+                <title>{{ getBarTooltip(activity) }}
+(Click to open in new tab)</title>
               </rect>
             </g>
 
@@ -665,7 +666,11 @@ const agentRows = computed(() => {
       scheduleName: event.schedule_name,
       // For navigation to execution details
       executionId: event.execution_id,
-      agentName: event.source_agent
+      agentName: event.source_agent,
+      // #514: previews + error text for hover tooltip
+      commandPreview: event.command_preview || '',
+      responsePreview: event.response_preview || '',
+      errorText: event.error || ''
     })
   })
 
@@ -721,7 +726,11 @@ const agentRows = computed(() => {
         scheduleName: act.scheduleName,
         // For navigation to execution details
         executionId: act.executionId,
-        agentName: act.agentName
+        agentName: act.agentName,
+        // #514: previews carried through to getBarTooltip
+        commandPreview: act.commandPreview,
+        responsePreview: act.responsePreview,
+        errorText: act.errorText
       }
     })
 
@@ -1093,7 +1102,29 @@ function getBarTooltip(activity) {
     ? `~${formatDuration(activity.durationMs)}`
     : formatDuration(activity.durationMs)
 
-  return `${prefix} ${status} - ${duration}`.trim().replace('  ', ' ')
+  // Header line — same as before.
+  const header = `${prefix} ${status} - ${duration}`.trim().replace('  ', ' ')
+
+  // #514: optional command + response/error preview lines.
+  const lines = [header]
+  const cmd = previewLine(activity.commandPreview)
+  if (cmd) lines.push(`Cmd: ${cmd}`)
+  if (activity.hasError && activity.errorText) {
+    lines.push(`Error: ${previewLine(activity.errorText)}`)
+  } else {
+    const resp = previewLine(activity.responsePreview)
+    if (resp) lines.push(`Out: ${resp}`)
+  }
+  return lines.join('\n')
+}
+
+// #514: collapse newlines, trim, truncate to 80 chars with an ellipsis.
+// Empty/whitespace-only input returns empty so the tooltip line is skipped.
+function previewLine(text) {
+  if (!text) return ''
+  const collapsed = String(text).replace(/\s+/g, ' ').trim()
+  if (!collapsed) return ''
+  return collapsed.length > 80 ? collapsed.slice(0, 80) + '…' : collapsed
 }
 
 // Schedule marker helper functions

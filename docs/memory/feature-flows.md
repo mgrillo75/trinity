@@ -11,12 +11,21 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-29 | #584 | feat(slack): UI + API to change Slack DM-default agent — `set_slack_dm_default()` DB method (single-tx clear-then-set), `PUT /api/agents/{name}/slack/channel/dm-default` (owner-only, audit-logged), "Make default" button + tooltip in `SlackChannelPanel.vue`, unbind refuses 409 when target is DM default with siblings remaining | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
+| 2026-04-30 | #598 | sec: AISEC-C2 Layer 2 — restored `.mcp.json` post-deploy editing via structure validation (`services.mcp_validator`). Closed schema, command/transport allowlists, SSRF guard for http/sse, reserved env-ref blocklist, literal-secret detection. 88 unit tests + 22 integration tests. UI placeholder updated; `trinity` server name reserved. | [credential-injection.md](feature-flows/credential-injection.md) |
+| 2026-04-30 | #590 | sec: AISEC-C2 Layer 1 — backend `ALLOWED_CREDENTIAL_PATHS` tightened; backend `update_agent_file_logic` adds defense-in-depth deny check before proxy; agent-server `EDIT_PROTECTED_PATHS` adds `.mcp.json` and `.credentials.enc`. | [credential-injection.md](feature-flows/credential-injection.md), [file-browser.md](feature-flows/file-browser.md) |
+| 2026-04-30 | #364 | Web chat file upload — drag-drop/picker in ChatPanel and PublicChat; base64 JSON encoding; shared upload_service; images via vision blocks, non-images via Docker put_archive | [web-chat-file-upload.md](feature-flows/web-chat-file-upload.md) |
+| 2026-04-27 | #539 | fix: public chat context duplication — `build_public_chat_context()` now called before `add_public_chat_message(role="user")`, preventing current message appearing twice in every agent prompt | [public-agent-links.md](feature-flows/public-agent-links.md) |
+| 2026-04-26 | #428 | CapacityManager facade — single public surface for capacity (admit / release / overflow policy / status / reclaim) replacing ExecutionQueue + SlotService + BacklogService trio | [capacity-management.md](feature-flows/capacity-management.md) |
 | 2026-04-26 | #516, #520 | Agent error classification — `_classify_signal_exit()` (504 for SIGINT/SIGKILL/SIGTERM, was misread as 503 auth) and `_classify_empty_result()` (502 when clean exit drops the final result message, was silent 200 + watchdog reap) | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md), [task-execution-service.md](feature-flows/task-execution-service.md) |
 | 2026-04-26 | #498 | Sync `/task` long-poll on backlog — sync parallel calls at capacity now spill to BACKLOG-001 (same backlog as async) and long-poll the open HTTP connection until terminal status (cap `2 × effective_timeout`); new `services/sync_waiter.py` owns the in-process registry + event/poll-fallback wait helper | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
+| 2026-04-24 | FILES-001 (#295) | Outbound file sharing — per-agent opt-in publish volume, `share_file` MCP tool, public download URL (`?sig=` token), UI panel with toggle/list/revoke. Agents publish files to `/home/developer/public/`; backend extracts via Docker SDK `get_archive` on demand; URL format `/api/files/{id}?sig={token}` | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) |
 | 2026-04-24 | WEBHOOK-001 (#291) | Webhook triggers — token-authenticated public URL fires schedule executions | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
+| 2026-04-25 | #496 | Backlog drain spawn fix — repair `_spawn_drain` lazy import after #95 renamed `_execute_task_background` → `_run_async_task_with_persistence`; AST-based regression tests pin the contract | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) |
 | 2026-04-25 | #487 | Telegram file upload Phase 2 — workspace delivery hardening: NFKC sanitizer with collision dedup, spec injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`, all-writes-failed channel error + abort. Same code path benefits Slack inbound. | [telegram-integration.md](feature-flows/telegram-integration.md), [slack-file-sharing.md](feature-flows/slack-file-sharing.md) |
 | 2026-04-23 | #476 | SQLite lexicographic cutoff bug fix — new `iso_cutoff(hours)` helper replaces `datetime('now', ...)` in 15 sites across rate-limit / dashboard / schedules; `max_retries` default flipped `1 → 0`; `cleanup_old_rate_limit_events` wired into `CleanupService` (phase 6, hourly) | [subscription-auto-switch.md](feature-flows/subscription-auto-switch.md), [cleanup-service.md](feature-flows/cleanup-service.md), [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-04-22 | #458 | `.gitignore` init fix — `initialize_git_in_container` now appends missing patterns instead of truncate-and-write; adds `.env`, `.env.*`, `.mcp.json` to the default list and runs for both `/home/developer` and legacy `/home/developer/workspace` (stops credential leak on first GitHub sync) | [github-repo-initialization.md](feature-flows/github-repo-initialization.md) |
+| 2026-04-22 | SCHED-COND-001 (#454) | Conditional schedule pre-check — backend `docker exec`s the template's executable `~/.trinity/pre-check` (language-agnostic, interpreter from shebang) before scheduler fires a cron chat; empty stdout + exit 0 records a skipped execution; fail-open; reuses `ExecutionStatus.SKIPPED` (no schema change, no HTTP edge from scheduler to agent) | [scheduler-pre-check.md](feature-flows/scheduler-pre-check.md) |
 | 2026-04-21 | RELIABILITY-003 (#306) | WebSocket event bus on Redis Streams — replaces in-process broadcast with XADD/XREAD, adds reconnect replay via `?last-event-id=`, 3-failure eviction, MAXLEN trim (tunable) | [websocket-event-bus.md](feature-flows/websocket-event-bus.md) |
 | 2026-04-20 | #420 | Scheduler sync loop fix — `update_schedule_run_times` no longer bumps `updated_at`, stopping the self-triggering re-register of every schedule per tick | [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-04-20 | #418 | Inter-agent timeout honors per-agent `execution_timeout_seconds` — removed 600s hardcoded defaults in MCP `chat_with_agent`/`fan_out` tools and fan-out service; HTTP client ceiling bumped to platform max (7200s) | [fan-out.md](feature-flows/fan-out.md), [mcp-orchestration.md](feature-flows/mcp-orchestration.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
@@ -145,6 +154,7 @@
 | Parallel Headless Execution | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) | Stateless parallel task execution via POST /task |
 | Parallel Capacity | [parallel-capacity.md](feature-flows/parallel-capacity.md) | Per-agent parallel execution slot tracking |
 | Persistent Task Backlog | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) | SQLite-backed FIFO backlog for async tasks at capacity (BACKLOG-001) |
+| Capacity Management | [capacity-management.md](feature-flows/capacity-management.md) | Unified facade for per-agent execution capacity (#428) |
 | Task Execution Service | [task-execution-service.md](feature-flows/task-execution-service.md) | Unified execution lifecycle for all task callers (EXEC-024) |
 | Business Validation | [business-validation.md](feature-flows/business-validation.md) | Post-execution auditor verifies task completion (VALIDATE-001) |
 | Fan-Out | [fan-out.md](feature-flows/fan-out.md) | Parallel task dispatch and result collection via semaphore (FANOUT-001) |
@@ -191,6 +201,7 @@
 | Agent Permissions | [agent-permissions.md](feature-flows/agent-permissions.md) | Agent communication permissions |
 | Agent Sharing | [agent-sharing.md](feature-flows/agent-sharing.md) | Cross-channel email allow-list (web/Slack/Telegram) with access policy and pending requests |
 | Agent Shared Folders | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File collaboration via shared volumes |
+| Outbound File Sharing | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) | Agents publish files to public download URLs (FILES-001) |
 | Agent Tags & System Views | [agent-tags.md](feature-flows/agent-tags.md) | Tagging and saved filters (ORG-001) |
 | Tag Clouds | [tag-clouds.md](feature-flows/tag-clouds.md) | Visual grouping on Dashboard |
 
@@ -303,6 +314,12 @@
 | API Keys Page | [api-keys-page.md](feature-flows/api-keys-page.md) | `/api-keys` page UI flow |
 | Agents Page UI | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md) | Horizontal row tiles with success rate bars, filtering, responsive breakpoints |
 | Alerts Page | [alerts-page.md](feature-flows/alerts-page.md) | Removed in #430 (process engine deletion; cost alerts were PE-only) |
+
+### File Management
+
+| Flow | Document | Description |
+|------|----------|-------------|
+| Web Chat File Upload | [web-chat-file-upload.md](feature-flows/web-chat-file-upload.md) | Drag-drop/picker for authenticated and public chat; shared upload_service (#364) |
 
 ### Chat & Sessions
 

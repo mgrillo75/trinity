@@ -12,11 +12,9 @@ Uses the same execution path as web public chat (EXEC-024) for:
 - Credential sanitization
 """
 
-import io
 import logging
 import os
 import re
-import tarfile
 import time
 import unicodedata
 from typing import List, Optional, Tuple
@@ -26,20 +24,12 @@ from database import db
 from services.docker_service import get_agent_container
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
-from services.docker_utils import container_put_archive, container_exec_run
-from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.docker_utils import container_exec_run
 from services.telegram_media import process_voice
+from services.upload_service import process_file_uploads, format_file_size, sanitize_filename
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
-
-# Try to import python-magic for MIME validation; graceful fallback if unavailable
-try:
-    import magic
-    _MAGIC_AVAILABLE = True
-except ImportError:
-    _MAGIC_AVAILABLE = False
-    logger.warning("[ROUTER] python-magic not installed; MIME validation will trust channel metadata")
 
 
 # ---------------------------------------------------------------------------
@@ -173,13 +163,11 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
 
 
 def _format_file_size(size_bytes: int) -> str:
-    """Format bytes as human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.0f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return format_file_size(size_bytes)
+
+
+def _sanitize_filename(name: str, file_id: str, used_names: set) -> str:
+    return sanitize_filename(name, file_id, used_names)
 
 
 # Filename sanitization (Issue #487)
@@ -465,8 +453,9 @@ class ChannelMessageRouter:
         # Issue #487: workspace-write failures abort execution and surface a
         # channel-native error so the user knows the upload didn't land.
         upload_dir = None  # Track for cleanup
+        image_data: list = []
         if message.files:
-            file_descriptions, upload_dir, all_writes_failed = await self._handle_file_uploads(
+            file_descriptions, upload_dir, all_writes_failed, image_data = await self._handle_file_uploads(
                 adapter, message, agent_name, container, session_id,
                 verified_email=verified_email,
             )
@@ -504,10 +493,9 @@ class ChannelMessageRouter:
         # Configurable via settings_service (default: WebSearch, WebFetch)
         public_allowed_tools = _get_channel_allowed_tools()
 
-        # If user uploaded non-image files, agent needs Read to access them.
-        # Images are excluded: Claude Code crashes when reading PNGs with
-        # --allowedTools (API returns 400 "Could not process image" and the
-        # process exits without flushing stdout, hanging the pipe reader).
+        # Non-image files land at upload_dir in the container; agent needs Read
+        # to access them. Images are delivered as vision content blocks via
+        # --input-format stream-json (#562), so no Read is needed for them.
         _IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
         has_readable_files = message.files and any(
             f.mimetype not in _IMAGE_MIMES for f in message.files
@@ -525,6 +513,7 @@ class ChannelMessageRouter:
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
+                images=image_data or None,
             )
 
             if result.status == "failed":
@@ -696,226 +685,34 @@ class ChannelMessageRouter:
         verified_email: Optional[str] = None,
     ) -> tuple:
         """
-        Download files via adapter and either:
-        - Images: embed as base64 data URI in the prompt (Claude vision)
-        - Other files: copy into per-session dir in agent container
+        Download files via adapter then delegate to the shared upload service.
 
-        Returns (descriptions, upload_dir, all_writes_failed):
-        - descriptions: list of context strings for prompt injection
-        - upload_dir: container path to clean up after execution, or None
-        - all_writes_failed: True iff at least one file attempted a workspace
-          write but every such attempt failed; the caller should reply with
-          an explicit error and skip agent execution (Issue #487 AC6).
+        Returns (descriptions, upload_dir, all_writes_failed, image_data).
         """
-        import base64
-
-        MAX_FILE_SIZE = 10 * 1024 * 1024       # 10 MB per file
-        MAX_IMAGE_SIZE = 5 * 1024 * 1024        # 5 MB per image for inline base64
-        MAX_TOTAL_IMAGE_SIZE = 10 * 1024 * 1024 # 10 MB total across all images
-        MAX_FILES = 10                          # Max files per message
-        UNSUPPORTED_MIMES = {"application/pdf", "application/zip", "application/x-tar",
-                             "application/gzip", "application/x-rar-compressed",
-                             "video/", "audio/"}
-
-        UPLOAD_BASE = "/home/developer/uploads"
-        safe_session_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
-        upload_dir = f"{UPLOAD_BASE}/{safe_session_id}"
-        descriptions = []
-        dir_created = False
-        total_image_bytes = 0
-        used_names: set = set()
-
-        # Uploader attribution for chat injection (Issue #487 AC3).
-        # Prefer the verified email; fall back to the channel-native source id
-        # so agents always see who sent the file.
         uploader = verified_email or adapter.get_source_identifier(message)
 
-        # Track workspace-write outcomes. A "write" is a real attempt to
-        # persist bytes (mkdir / put_archive for files; base64 embed for
-        # images). Validation rejections (size/MIME/unsupported) do NOT count
-        # as write attempts — those are user errors and the agent should
-        # respond normally with the description block.
-        write_attempted = 0
-        write_succeeded = 0
-
-        files = message.files
-        for f in files[:MAX_FILES]:
-            is_image = f.mimetype.startswith("image/")
-
-            # Reject unsupported binary formats (PDF, archives, video, audio)
-            if any(f.mimetype.startswith(m) if m.endswith("/") else f.mimetype == m
-                   for m in UNSUPPORTED_MIMES):
-                descriptions.append(f"{f.name} — unsupported format ({f.mimetype}). Text, CSV, JSON, and image files are supported.")
-                continue
-
-            # Sanitize filename — unicode NFKC, basename, strip unsafe chars,
-            # truncate to 200 chars preserving extension, dedup collisions
-            # with -1/-2 suffixes (Issue #487 AC2).
-            safe_name = _sanitize_filename(f.name, f.id, used_names)
-            used_names.add(safe_name)
-
-            # Size checks
-            size_limit = MAX_IMAGE_SIZE if is_image else MAX_FILE_SIZE
-            if f.size > size_limit:
-                logger.warning(f"[ROUTER] Skipping {safe_name}: too large ({f.size} bytes)")
-                descriptions.append(f"{safe_name} — skipped (exceeds {_format_file_size(size_limit)} limit)")
-                continue
-
-            # Download via adapter (channel-agnostic)
+        # Download each file via the channel adapter before calling the shared service
+        raw_files = []
+        for f in message.files:
             data = await adapter.download_file(f, message)
-            if not data:
-                logger.warning(f"[ROUTER] Failed to download {safe_name} from {adapter.channel_type}")
-                descriptions.append(f"{safe_name} — download failed")
-                continue
+            raw_files.append({
+                "name": f.name,
+                "mimetype": f.mimetype,
+                "size": f.size,
+                "data": data,  # None signals download failure to the service
+                "id": f.id,
+            })
 
-            # Post-download size validation (TOCTOU defense)
-            actual_size = len(data)
-            if actual_size > size_limit:
-                logger.warning(
-                    f"[ROUTER] Rejecting {safe_name}: actual size ({actual_size}) exceeds limit "
-                    f"(metadata claimed {f.size})"
-                )
-                descriptions.append(f"{safe_name} — rejected (actual size exceeds {_format_file_size(size_limit)} limit)")
-                continue
-
-            # Magic-byte MIME validation (if python-magic available)
-            actual_mime = f.mimetype
-            if _MAGIC_AVAILABLE:
-                try:
-                    detected_mime = magic.from_buffer(data, mime=True)
-                    # Allow if detected MIME matches declared, or both are image types
-                    declared_is_image = f.mimetype.startswith("image/")
-                    detected_is_image = detected_mime.startswith("image/")
-
-                    if detected_mime != f.mimetype:
-                        # Accept if both are images (JPEG vs PNG mislabel is common)
-                        if declared_is_image and detected_is_image:
-                            logger.debug(
-                                f"[ROUTER] MIME mismatch for {safe_name}: "
-                                f"declared={f.mimetype}, detected={detected_mime} (both images, allowing)"
-                            )
-                            actual_mime = detected_mime
-                            is_image = True  # Update in case detection is more accurate
-                        # Accept text subtypes (text/plain vs text/csv)
-                        elif f.mimetype.startswith("text/") and detected_mime.startswith("text/"):
-                            logger.debug(f"[ROUTER] Text subtype variation: {f.mimetype} vs {detected_mime}")
-                            actual_mime = detected_mime
-                        else:
-                            logger.warning(
-                                f"[ROUTER] Rejecting {safe_name}: MIME mismatch "
-                                f"(declared={f.mimetype}, detected={detected_mime})"
-                            )
-                            descriptions.append(f"{safe_name} — rejected (file type mismatch)")
-                            continue
-                except Exception as e:
-                    logger.warning(f"[ROUTER] MIME detection failed for {safe_name}: {e}")
-                    # Fall through — use declared MIME
-
-            size_str = _format_file_size(actual_size)
-
-            if is_image:
-                # Check total inline image budget
-                if total_image_bytes + len(data) > MAX_TOTAL_IMAGE_SIZE:
-                    logger.warning(f"[ROUTER] Skipping {safe_name}: total image budget exceeded")
-                    descriptions.append(f"{safe_name} ({size_str}) — skipped (total image size limit reached)")
-                    continue
-
-                # Image embedding is the "write" for vision-mode files.
-                write_attempted += 1
-                total_image_bytes += len(data)
-                b64 = base64.b64encode(data).decode()
-                descriptions.append(
-                    f"[File uploaded by {uploader}]: {safe_name} ({size_str}) — image attached inline\n"
-                    f"![{safe_name}](data:{actual_mime};base64,{b64})"
-                )
-                write_succeeded += 1
-                logger.info(f"[ROUTER] Embedded {safe_name} ({size_str}) as base64 for {agent_name}")
-
-                # Audit log for image upload
-                await platform_audit_service.log(
-                    event_type=AuditEventType.EXECUTION,
-                    event_action="file_upload",
-                    source=adapter.channel_type,
-                    target_type="agent",
-                    target_id=agent_name,
-                    details={
-                        "filename": safe_name,
-                        "size_bytes": actual_size,
-                        "mime_type": actual_mime,
-                        "storage": "inline_base64",
-                        "sender_id": message.sender_id,
-                        "channel_id": message.channel_id,
-                        "uploader": uploader,
-                    },
-                )
-            else:
-                # Create per-session upload directory on first non-image file.
-                # mkdir is the entry point for container writes — count it as
-                # one attempt for the file that triggered it.
-                if not dir_created:
-                    write_attempted += 1
-                    try:
-                        await container_exec_run(container, f"mkdir -p {upload_dir}", user="developer")
-                        dir_created = True
-                    except Exception as e:
-                        logger.error(f"[ROUTER] Failed to create {upload_dir} in {agent_name}: {e}")
-                        descriptions.append(f"[File upload failed]: {safe_name} — could not create workspace upload directory")
-                        continue
-                else:
-                    write_attempted += 1
-
-                try:
-                    tar_buf = io.BytesIO()
-                    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-                        info = tarfile.TarInfo(name=safe_name)
-                        info.size = len(data)
-                        info.uid = 1000  # developer user
-                        info.gid = 1000
-                        info.mode = 0o644
-                        tar.addfile(info, io.BytesIO(data))
-                    tar_buf.seek(0)
-
-                    success = await container_put_archive(container, upload_dir, tar_buf.read())
-                    if not success:
-                        logger.error(f"[ROUTER] Failed to copy {safe_name} into {agent_name}")
-                        descriptions.append(f"[File upload failed]: {safe_name} — could not save to agent workspace")
-                        continue
-
-                    dest_path = f"{upload_dir}/{safe_name}"
-                    descriptions.append(
-                        f"[File uploaded by {uploader}]: {safe_name} ({size_str}) saved to {dest_path}"
-                    )
-                    write_succeeded += 1
-                    logger.info(f"[ROUTER] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
-
-                    # Audit log for file upload
-                    await platform_audit_service.log(
-                        event_type=AuditEventType.EXECUTION,
-                        event_action="file_upload",
-                        source=adapter.channel_type,
-                        target_type="agent",
-                        target_id=agent_name,
-                        details={
-                            "filename": safe_name,
-                            "size_bytes": actual_size,
-                            "mime_type": actual_mime,
-                            "storage": "container_file",
-                            "dest_path": dest_path,
-                            "sender_id": message.sender_id,
-                            "channel_id": message.channel_id,
-                            "uploader": uploader,
-                        },
-                    )
-
-                except Exception as e:
-                    logger.error(f"[ROUTER] Error copying {safe_name} to {agent_name}: {e}")
-                    descriptions.append(f"[File upload failed]: {safe_name} — workspace write error")
-
-        if len(files) > MAX_FILES:
-            descriptions.append(f"({len(files) - MAX_FILES} more file(s) skipped — max {MAX_FILES} per message)")
-
-        all_writes_failed = write_attempted > 0 and write_succeeded == 0
-        return descriptions, upload_dir if dir_created else None, all_writes_failed
+        return await process_file_uploads(
+            raw_files=raw_files,
+            agent_name=agent_name,
+            container=container,
+            session_id=session_id,
+            uploader=uploader,
+            source=adapter.channel_type,
+            sender_id=message.sender_id,
+            channel_id=message.channel_id,
+        )
 
 
 # Singleton instance

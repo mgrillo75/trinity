@@ -298,12 +298,22 @@ def test_migration_is_idempotent(tmp_path):
     # its package triggers loading the whole db/ tree (pytz, fastapi, etc.).
     migration_path = REPO_ROOT / "src" / "backend" / "db" / "migrations.py"
     src = migration_path.read_text()
+
+    # Extract _safe_add_column helper (#456) — the migration delegates to it.
+    helper_start = src.index("def _safe_add_column")
+    helper_rest = src[helper_start:]
+    helper_end = helper_rest.index("\ndef ", 1)
+    helper_src = helper_rest[:helper_end]
+
+    # Extract the migration function.
     start = src.index("def _migrate_agent_ownership_guardrails")
-    # grab the function body up to the next top-level def
     rest = src[start:]
     end = rest.index("\ndef ", 1)
-    ns: dict = {}
-    exec(rest[:end], ns)
+    migration_src = rest[:end]
+
+    import sqlite3 as _sqlite3
+    ns: dict = {"sqlite3": _sqlite3}
+    exec(helper_src + "\n" + migration_src, ns)
     migrate = ns["_migrate_agent_ownership_guardrails"]
 
     migrate(cursor, conn)

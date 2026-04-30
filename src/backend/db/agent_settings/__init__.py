@@ -9,6 +9,7 @@ Each module provides a mixin class that AgentOperations inherits from:
 - AvatarMixin: Avatar identity management
 - MetadataMixin: Batch queries, rename operations
 - GitPATMixin: Per-agent GitHub PAT management (#347)
+- FileSharingMixin: Per-agent outbound file-sharing toggle (FILES-001)
 """
 
 from .sharing import SharingMixin
@@ -19,6 +20,7 @@ from .avatar import AvatarMixin
 from .metadata import MetadataMixin
 from .access_policy import AccessPolicyMixin
 from .git_pat import GitPATMixin
+from .file_sharing import FileSharingMixin
 
 __all__ = [
     'SharingMixin',
@@ -29,4 +31,5 @@ __all__ = [
     'MetadataMixin',
     'AccessPolicyMixin',
     'GitPATMixin',
+    'FileSharingMixin',
 ]

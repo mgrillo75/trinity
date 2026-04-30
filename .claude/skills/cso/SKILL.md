@@ -132,13 +132,34 @@ For each workflow file in `.github/workflows/`:
 
 **Docker socket access**: Check if backend has Docker socket mounted and what permissions it has.
 
-**Severity**: CRITICAL for prod DB URLs with credentials in committed config. HIGH for root containers in prod / Docker socket access without read-only. MEDIUM for missing USER directive / exposed ports.
+**Redis authentication and network isolation**:
+- Check `redis.conf` or Docker env for `requirepass` — unauthenticated Redis reachable from the agent container network is CRITICAL (agents get full read/write to all task queues and secrets including other tenants')
+- Check if agent containers have direct TCP access to Redis (e.g., `redis:6379`) — they should reach the platform only via the backend HTTP API, not the Redis port directly
+- Check Redis keyspace for per-user isolation — if all users share a Redis namespace without user-scoped key prefixes, cross-tenant enumeration is possible even with auth
+
+**Docker `base_image` allowlist**:
+- Search agent creation code for the `base_image` field — verify it's validated against an allowlist (regex or explicit list), not accepted as free text from the API request body
+- An unvalidated `base_image` lets any authenticated user pull and execute arbitrary Docker images inside the agent network, giving access to Redis, the MCP server, and credential env vars
+
+**Setup/onboarding endpoint exposure**:
+- Check if the first-run setup endpoint (`/api/setup`, `/setup`, etc.) is network-accessible or bound to 127.0.0.1 only
+- If accessible from the public internet, check whether it uses a single-use bootstrapping token to prevent a race-condition hijack granting full admin control to an external caller
+
+**Severity**: CRITICAL for Redis without auth accessible from agent network. CRITICAL for unvalidated `base_image`. HIGH for setup endpoint reachable from public internet without a single-use token. HIGH for root containers in prod / Docker socket access without read-only. MEDIUM for missing USER directive / exposed ports.
 
 **FP rules**: `docker-compose.yml` for local dev with localhost = not a finding.
 
 ### Phase 6: Webhook & Integration Audit
 
 **Webhook routes**: Find files containing webhook/hook/callback route patterns. Check whether they also contain signature verification.
+
+**Internal endpoint auth completeness**:
+- For every route in the internal router (routes under `/api/internal/` or any "internal" prefix), verify each endpoint enforces the shared-secret header (`X-Internal-Secret`) — not just that the pattern exists in the file, but that every individual route uses it
+- Probe: send request to each internal endpoint without the header and confirm 401/403, not 200
+
+**Webhook trigger auth (not just signature)**:
+- For webhook trigger endpoints, check for the presence of `Depends(get_current_user)` or an equivalent auth gate — not just HMAC signature verification
+- Trigger routes have been found missing auth entirely while signature verification exists elsewhere in the same file; the two are independent checks
 
 **TLS verification disabled**: Search for `verify=False`, `VERIFY_NONE`, etc.
 
@@ -156,8 +177,9 @@ Trinity-specific AI security concerns:
 - **AI API keys in code**: Hardcoded API key assignments (not env vars)
 - **Credential injection safety**: Are injected credentials exposed to agent code in unexpected ways?
 - **Cost/resource attacks**: Can a user trigger unbounded LLM calls via agent chat?
+- **Agent container network reach**: From inside an agent container, check what internal services are directly reachable (Redis, MCP server backend port, etc.). Agent containers should reach the platform only through the backend HTTP API — direct TCP access to Redis, internal service ports, or other agents' containers outside the API layer is a CRITICAL isolation failure. Check `docker-compose.yml` network definitions and confirm agent containers cannot reach `redis:6379` or `mcp-server:8080` directly.
 
-**Severity**: CRITICAL for user input in system prompts / unsanitized LLM output rendered as HTML. HIGH for missing tool call validation / exposed AI API keys. MEDIUM for unbounded LLM calls.
+**Severity**: CRITICAL for user input in system prompts / unsanitized LLM output rendered as HTML. CRITICAL for agent containers with direct Redis or internal service access bypassing the API. HIGH for missing tool call validation / exposed AI API keys. MEDIUM for unbounded LLM calls.
 
 **FP rules**: User content in the user-message position of an AI conversation is NOT prompt injection.
 
@@ -178,10 +200,14 @@ For each OWASP category, perform targeted analysis. Scope file extensions to Pyt
 - Missing auth on routes (check FastAPI dependency injection for auth)
 - Direct object reference (can user A access user B's agents by changing IDs?)
 - Horizontal/vertical privilege escalation
+- **Internal router completeness**: Every endpoint in the internal router must use the shared-secret dependency — audit the full router, not a sample. No route should return 200 without the secret header.
+- **Role-permission consistency across ALL creation routes**: For each resource-creation endpoint (`POST /api/agents`, `/api/processes`, `/deploy-local`, webhook-triggered deployments, etc.), verify the same role-check dependency is used. The lowest-privilege role must not bypass the creation gate via any alternate route.
+- **File-write path policy completeness**: For any file-write API, verify the path-deny/allowlist is evaluated in full — not just basename matching. Specifically check: can `.mcp.json`, `.env`, `.credentials.enc`, or `.ssh/*` be reached via path traversal or a sibling endpoint (e.g., `/credentials/inject`) that enforces a shorter deny list?
 
 #### A02: Cryptographic Failures
 - Weak crypto (MD5, SHA1, DES, ECB) or hardcoded secrets
 - JWT implementation (algorithm, expiration, secret management)
+- **SSH key server-side generation**: Check if SSH private keys are generated server-side and returned in API responses. Flag as HIGH — clients should generate keypairs locally and submit only the public key. Server-generated private keys are exposed in transit and in API/access logs.
 
 #### A03: Injection
 - SQL injection: raw queries, string interpolation in SQL (check `database.py`)
@@ -192,6 +218,8 @@ For each OWASP category, perform targeted analysis. Scope file extensions to Pyt
 - Rate limits on authentication endpoints?
 - Account lockout after failed attempts?
 - Business logic validated server-side?
+- **Rate limiting quality**: Per-IP-only rate limits are bypassable via rotating proxies/Tor/IPv6 subnets. Check that rate limiting on auth endpoints (login, OTP, password reset) uses a per-account/per-email counter as the primary bucket. Also check that hard lockout on IP isn't itself a DoS primitive — progressive delay or CAPTCHA is safer than a hard block.
+- **OTP brute-force window**: For email OTP flows, verify the code space (6 digits = 1M possibilities) is protected by an attempt counter that survives process restarts (stored in Redis/DB, not in-memory), and that codes expire within 5–10 minutes.
 
 #### A05: Security Misconfiguration
 - CORS configuration (wildcard origins?)

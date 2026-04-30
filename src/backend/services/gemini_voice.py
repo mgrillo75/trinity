@@ -6,6 +6,7 @@ speech-to-speech conversations with agents via Gemini 2.5 Flash Native Audio.
 
 Architecture:
   Browser (mic) → WebSocket → Backend → Gemini Live API → Backend → WebSocket → Browser (speaker)
+  Gemini tool_call → Backend._execute_tool → Agent container → tool_response → Gemini
 """
 
 import asyncio
@@ -24,6 +25,34 @@ logger = logging.getLogger(__name__)
 # Audio format constants
 INPUT_SAMPLE_RATE = 16000   # 16kHz PCM input to Gemini
 OUTPUT_SAMPLE_RATE = 24000  # 24kHz PCM output from Gemini
+
+# Max chars for tool call prompts (prevent injection via very long args)
+_TOOL_PROMPT_MAX = 2000
+
+# Single tool declaration for all voice sessions
+_RUN_TASK_TOOL = genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="run_task",
+            description=(
+                "Execute a task in the agent's workspace — look something up, "
+                "read a file, search for information, or perform an action. "
+                "Use this when you need live data or agent capabilities to answer accurately. "
+                "Returns a text response from the agent."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "prompt": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Clear description of what to look up or do",
+                    )
+                },
+                required=["prompt"],
+            ),
+        )
+    ]
+)
 
 
 @dataclass
@@ -47,13 +76,17 @@ class VoiceSession:
     _gemini_session: object = field(default=None, repr=False)
     _send_task: object = field(default=None, repr=False)
     _receive_task: object = field(default=None, repr=False)
+    _timeout_task: object = field(default=None, repr=False)
     _audio_in_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _pending_tool_tasks: dict = field(default_factory=dict)  # call_id → asyncio.Task
     _active: bool = False
     _duration_seconds: float = 0.0
     # Callbacks
     _on_audio_out: Optional[Callable] = field(default=None, repr=False)
     _on_transcript: Optional[Callable] = field(default=None, repr=False)
     _on_status: Optional[Callable] = field(default=None, repr=False)
+    _on_tool_call: Optional[Callable] = field(default=None, repr=False)    # (name, args) → None
+    _on_tool_result: Optional[Callable] = field(default=None, repr=False)  # (name, result) → None
 
 
 class GeminiVoiceService:
@@ -104,13 +137,16 @@ class GeminiVoiceService:
         session_id: str,
         on_audio_out: Callable[[bytes], Awaitable[None]],
         on_transcript: Callable[[str, str], Awaitable[None]],  # (role, text)
-        on_status: Callable[[str], Awaitable[None]],  # status string
+        on_status: Callable[[str], Awaitable[None]],           # status string
+        on_tool_call: Optional[Callable] = None,               # (name, args) → None
+        on_tool_result: Optional[Callable] = None,             # (name, result) → None
     ):
         """
         Connect to Gemini Live API and begin streaming.
 
         This is the main loop that runs for the lifetime of the voice session.
         It spawns send/receive tasks and waits until the session ends.
+        Tool calls are executed asynchronously against the agent container.
         """
         session = self._sessions.get(session_id)
         if not session:
@@ -119,6 +155,8 @@ class GeminiVoiceService:
         session._on_audio_out = on_audio_out
         session._on_transcript = on_transcript
         session._on_status = on_status
+        session._on_tool_call = on_tool_call
+        session._on_tool_result = on_tool_result
         session._active = True
 
         client = self._get_client()
@@ -133,6 +171,7 @@ class GeminiVoiceService:
                     )
                 )
             ),
+            tools=[_RUN_TASK_TOOL],
         )
 
         try:
@@ -153,7 +192,7 @@ class GeminiVoiceService:
                     session._receive_task = tg.create_task(
                         self._receive_audio_loop(session)
                     )
-                    session._send_task = tg.create_task(
+                    session._timeout_task = tg.create_task(
                         self._timeout_watchdog(session)
                     )
 
@@ -187,8 +226,7 @@ class GeminiVoiceService:
                 break
 
     async def _receive_audio_loop(self, session: VoiceSession):
-        """Receive audio and transcriptions from Gemini."""
-        # Track partial transcriptions for assembling full utterances
+        """Receive audio, transcriptions, and tool calls from Gemini."""
         current_user_text = ""
         current_assistant_text = ""
 
@@ -198,6 +236,17 @@ class GeminiVoiceService:
                 async for response in turn:
                     if not session._active:
                         return
+
+                    # Tool calls — spawn async task per call, keyed by call_id
+                    if hasattr(response, 'tool_call') and response.tool_call:
+                        fc_list = getattr(response.tool_call, 'function_calls', []) or []
+                        for fc in fc_list:
+                            call_id = getattr(fc, 'id', None) or secrets.token_hex(8)
+                            task = asyncio.create_task(
+                                self._execute_and_respond(session, call_id, fc)
+                            )
+                            session._pending_tool_tasks[call_id] = task
+                        continue
 
                     content = response.server_content
                     if not content:
@@ -233,7 +282,6 @@ class GeminiVoiceService:
                         if session._on_status:
                             await session._on_status("listening")
 
-                        # Save completed utterances to transcript
                         if current_user_text.strip():
                             session.transcript.append(
                                 VoiceTranscriptEntry(role="user", text=current_user_text.strip())
@@ -262,6 +310,71 @@ class GeminiVoiceService:
                 VoiceTranscriptEntry(role="assistant", text=current_assistant_text.strip())
             )
 
+    async def _execute_and_respond(self, session: VoiceSession, call_id: str, fc):
+        """Execute a Gemini tool call and send the response back. Runs as a background task."""
+        tool_name = getattr(fc, 'name', 'run_task')
+        args = dict(fc.args) if getattr(fc, 'args', None) else {}
+
+        try:
+            if session._on_tool_call:
+                await session._on_tool_call(tool_name, args)
+
+            result = await asyncio.wait_for(
+                self._execute_tool(session.agent_name, tool_name, args),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            result = "Tool execution timed out after 30 seconds."
+            logger.warning(f"Voice tool call timed out: {tool_name} session={session.session_id}")
+        except Exception as e:
+            result = f"Tool error: {str(e)[:200]}"
+            logger.error(f"Voice tool call error: {e}")
+        finally:
+            session._pending_tool_tasks.pop(call_id, None)
+
+        if session._on_tool_result:
+            try:
+                await session._on_tool_result(tool_name, result)
+            except Exception:
+                pass
+
+        if session._gemini_session and session._active:
+            try:
+                await session._gemini_session.send_tool_response(
+                    function_responses=[
+                        genai_types.FunctionResponse(
+                            id=call_id,
+                            name=tool_name,
+                            response={"output": result},
+                        )
+                    ]
+                )
+            except Exception as e:
+                logger.error(f"Failed to send tool response for {call_id}: {e}")
+
+    async def _execute_tool(self, agent_name: str, tool_name: str, args: dict) -> str:
+        """Route a tool call to the agent container via the task endpoint."""
+        from services.agent_client import get_agent_client, AgentNotReachableError, AgentRequestError
+
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            return "No prompt provided."
+        if len(prompt) > _TOOL_PROMPT_MAX:
+            prompt = prompt[:_TOOL_PROMPT_MAX] + "..."
+
+        logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt={prompt[:80]!r}")
+        try:
+            client = get_agent_client(agent_name)
+            response = await client.task(prompt, timeout=28.0)
+            return response.response or "Task completed with no response."
+        except AgentNotReachableError:
+            return f"Agent {agent_name!r} is not currently running."
+        except AgentRequestError as e:
+            return f"Task error: {str(e)[:200]}"
+        except Exception as e:
+            logger.error(f"Voice tool execution error for {agent_name}: {e}")
+            return f"Execution error: {str(e)[:200]}"
+
     async def _timeout_watchdog(self, session: VoiceSession):
         """Auto-end session after max duration."""
         await asyncio.sleep(VOICE_MAX_DURATION)
@@ -286,8 +399,14 @@ class GeminiVoiceService:
         # Send poison pill to unblock send loop
         await session._audio_in_queue.put(None)
 
-        # Cancel tasks
-        for task in [session._send_task, session._receive_task]:
+        # Cancel pending tool tasks
+        for task in list(session._pending_tool_tasks.values()):
+            if not task.done():
+                task.cancel()
+        session._pending_tool_tasks.clear()
+
+        # Cancel send/receive/timeout tasks
+        for task in [session._send_task, session._receive_task, session._timeout_task]:
             if task and not task.done():
                 task.cancel()
 

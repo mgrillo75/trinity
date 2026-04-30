@@ -10,24 +10,24 @@
       </div>
       <div class="space-y-1">
         <div v-if="stats.byPriority.critical > 0" class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+          <span class="w-2 h-2 rounded-full bg-status-danger-500 animate-pulse"></span>
           <span class="text-xs text-gray-600 dark:text-gray-400 flex-1">Critical</span>
-          <span class="text-xs font-medium text-red-600 dark:text-red-400">{{ stats.byPriority.critical }}</span>
+          <span class="text-xs font-medium text-status-danger-600 dark:text-status-danger-400">{{ stats.byPriority.critical }}</span>
         </div>
         <div v-if="stats.byPriority.high > 0" class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-orange-500"></span>
+          <span class="w-2 h-2 rounded-full bg-status-urgent-500"></span>
           <span class="text-xs text-gray-600 dark:text-gray-400 flex-1">High</span>
-          <span class="text-xs font-medium text-orange-600 dark:text-orange-400">{{ stats.byPriority.high }}</span>
+          <span class="text-xs font-medium text-status-urgent-600 dark:text-status-urgent-400">{{ stats.byPriority.high }}</span>
         </div>
         <div v-if="stats.byPriority.medium > 0" class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-yellow-500"></span>
+          <span class="w-2 h-2 rounded-full bg-status-warning-500"></span>
           <span class="text-xs text-gray-600 dark:text-gray-400 flex-1">Medium</span>
-          <span class="text-xs font-medium text-yellow-600 dark:text-yellow-400">{{ stats.byPriority.medium }}</span>
+          <span class="text-xs font-medium text-status-warning-600 dark:text-status-warning-400">{{ stats.byPriority.medium }}</span>
         </div>
         <div v-if="stats.byPriority.low > 0" class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+          <span class="w-2 h-2 rounded-full bg-status-info-400"></span>
           <span class="text-xs text-gray-600 dark:text-gray-400 flex-1">Low</span>
-          <span class="text-xs font-medium text-blue-600 dark:text-blue-400">{{ stats.byPriority.low }}</span>
+          <span class="text-xs font-medium text-status-info-600 dark:text-status-info-400">{{ stats.byPriority.low }}</span>
         </div>
       </div>
     </div>

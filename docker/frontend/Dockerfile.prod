@@ -17,15 +17,9 @@ COPY . .
 
 # Build arguments (injected at build time)
 ARG VITE_API_URL=http://localhost:8000
-ARG VITE_AUTH0_DOMAIN=dev-10tz4lo7hcoijxav.us.auth0.com
-ARG VITE_AUTH0_CLIENT_ID=bFeIEm4WAwaalgSnxsfS1V6vd4gOk0li
-ARG VITE_AUTH0_ALLOWED_DOMAIN=ability.ai
 
 # Set environment variables for Vite build
 ENV VITE_API_URL=${VITE_API_URL}
-ENV VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN}
-ENV VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID}
-ENV VITE_AUTH0_ALLOWED_DOMAIN=${VITE_AUTH0_ALLOWED_DOMAIN}
 
 # Build the application
 RUN npm run build

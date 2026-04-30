@@ -94,14 +94,19 @@ def _load_lifecycle():
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(
         return_value={"success": True}
     ))
+    file_sharing_mod = Mock(
+        check_public_folder_mount_matches=Mock(return_value=True),
+    )
 
     sys.modules[f"{pkg_name}.helpers"] = helpers_mod
     sys.modules[f"{pkg_name}.read_only"] = read_only_mod
+    sys.modules[f"{pkg_name}.file_sharing"] = file_sharing_mod
 
     # Also register under the import path used by lifecycle.py
     sys.modules['services.agent_service'] = pkg
     sys.modules['services.agent_service.helpers'] = helpers_mod
     sys.modules['services.agent_service.read_only'] = read_only_mod
+    sys.modules['services.agent_service.file_sharing'] = file_sharing_mod
 
     with patch.dict('sys.modules', _SYS_MOCKS):
         spec = importlib.util.spec_from_file_location(
@@ -147,6 +152,8 @@ def _reset():
     _mod.check_resource_limits_match = Mock(return_value=True)
     _mod.check_full_capabilities_match = Mock(return_value=True)
     _mod.check_guardrails_env_matches = Mock(return_value=True)
+    # By default, public folder mount matches the file_sharing_enabled flag
+    _mod.check_public_folder_mount_matches = Mock(return_value=True)
     # By default, no read-only mode
     _mock_db.get_read_only_mode.return_value = {"enabled": False}
 

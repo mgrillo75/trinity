@@ -427,12 +427,21 @@ class VerificationResponse(BaseModel):
     error: Optional[str] = None
 
 
+class WebFileUpload(BaseModel):
+    """A file attachment sent via web chat (base64-encoded)."""
+    name: str
+    mimetype: str
+    size: int
+    data_base64: str  # raw base64 or data: URI from FileReader.readAsDataURL()
+
+
 class PublicChatRequest(BaseModel):
     """Request to chat via a public link."""
     message: str
     session_token: Optional[str] = None  # Required if link requires email verification
     session_id: Optional[str] = None  # For anonymous links (stored in localStorage)
     async_mode: bool = False  # When true, return execution_id immediately for SSE streaming
+    files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
 
 
 class PublicChatResponse(BaseModel):

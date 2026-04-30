@@ -80,6 +80,11 @@ from .read_only import (
     inject_read_only_hooks,
     remove_read_only_hooks,
 )
+from .file_sharing import (
+    get_file_sharing_status_logic,
+    set_file_sharing_status_logic,
+    check_public_folder_mount_matches,
+)
 
 __all__ = [
     # Helpers
@@ -143,4 +148,8 @@ __all__ = [
     "set_read_only_status_logic",
     "inject_read_only_hooks",
     "remove_read_only_hooks",
+    # File Sharing (FILES-001 Step 2)
+    "get_file_sharing_status_logic",
+    "set_file_sharing_status_logic",
+    "check_public_folder_mount_matches",
 ]

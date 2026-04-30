@@ -97,10 +97,10 @@
       <!-- Already responded info -->
       <div v-if="item.status !== 'pending'" class="p-4 border-b border-gray-200 dark:border-gray-700">
         <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Response</h3>
-        <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-3 space-y-1">
-          <p class="text-sm font-medium text-green-800 dark:text-green-300">{{ item.response }}</p>
-          <p v-if="item.response_text" class="text-sm text-green-700 dark:text-green-400">{{ item.response_text }}</p>
-          <p class="text-xs text-green-600 dark:text-green-500">
+        <div class="bg-status-success-50 dark:bg-status-success-900/20 rounded-lg p-3 space-y-1">
+          <p class="text-sm font-medium text-status-success-800 dark:text-status-success-300">{{ item.response }}</p>
+          <p v-if="item.response_text" class="text-sm text-status-success-700 dark:text-status-success-400">{{ item.response_text }}</p>
+          <p class="text-xs text-status-success-600 dark:text-status-success-500">
             by {{ item.responded_by_email }} &middot; {{ formatDate(item.responded_at) }}
           </p>
         </div>
@@ -227,14 +227,14 @@ function submitAcknowledge() {
 }
 
 function optionSelectedClass(idx) {
-  if (idx === 0) return 'border-green-500 bg-green-50 text-green-700 dark:border-green-400 dark:bg-green-900/30 dark:text-green-300'
-  if (idx === 1) return 'border-red-500 bg-red-50 text-red-700 dark:border-red-400 dark:bg-red-900/30 dark:text-red-300'
+  if (idx === 0) return 'border-status-success-500 bg-status-success-50 text-status-success-700 dark:border-status-success-400 dark:bg-status-success-900/30 dark:text-status-success-300'
+  if (idx === 1) return 'border-status-danger-500 bg-status-danger-50 text-status-danger-700 dark:border-status-danger-400 dark:bg-status-danger-900/30 dark:text-status-danger-300'
   return 'border-blue-500 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-900/30 dark:text-blue-300'
 }
 
 function typeBadge(type) {
   const badges = {
-    approval: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+    approval: 'bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/30 dark:text-accent-purple-400',
     question: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
     alert: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
   }
@@ -243,9 +243,9 @@ function typeBadge(type) {
 
 function priorityBadge(priority) {
   const badges = {
-    critical: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-    high: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-    medium: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
+    critical: 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/30 dark:text-status-danger-400',
+    high: 'bg-status-urgent-100 text-status-urgent-700 dark:bg-status-urgent-900/30 dark:text-status-urgent-400',
+    medium: 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/30 dark:text-status-warning-400',
     low: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
   }
   return badges[priority] || ''
@@ -253,7 +253,7 @@ function priorityBadge(priority) {
 
 function statusBadge(status) {
   const badges = {
-    responded: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+    responded: 'bg-status-success-100 text-status-success-700 dark:bg-status-success-900/30 dark:text-status-success-400',
     acknowledged: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
   }
   return badges[status] || ''

@@ -41,6 +41,15 @@ services:
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
+      # Public access / OAuth callbacks
+      - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
+      - FRONTEND_URL=${FRONTEND_URL:-}
+      # CORS (comma-separated extra origins)
+      - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
+      # Slack channel adapter
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      # SSH access host override
+      - SSH_HOST=${SSH_HOST:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
