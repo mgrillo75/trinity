@@ -1536,6 +1536,9 @@ class DatabaseManager:
     def get_slack_dm_default_agent(self, team_id):
         return self._slack_channel_ops.get_dm_default_agent(team_id)
 
+    def set_slack_dm_default(self, team_id, agent_name):
+        return self._slack_channel_ops.set_dm_default(team_id, agent_name)
+
     def get_slack_agents_for_workspace(self, team_id):
         return self._slack_channel_ops.get_agents_for_workspace(team_id)
 
