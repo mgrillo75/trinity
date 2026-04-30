@@ -22,6 +22,7 @@ from models import (
 from config import OAUTH_CONFIGS, BACKEND_URL
 from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name
 from services.docker_service import get_agent_container, get_agent_status_from_container
+from services.mcp_validator import validate_mcp_config, McpValidationError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -29,15 +30,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["credentials"])
 
 # Allowlist of credential file paths that can be injected into agents.
-# Blocks arbitrary file writes (pentest 3.2.6 / #183) AND the .mcp.json
-# RCE escalation (AISEC-C2 / #590): raw .mcp.json/.mcp.json.template content
-# is attacker-controlled JSON that defines tool `command:` fields, so any
-# user-facing inject of those files = RCE-by-config. The platform-internal
-# `/api/credentials/update` flow on the agent-server still owns the legit
-# regenerate-from-template path, and platform services (template_service,
-# credential_encryption, github_pat_propagation) call the agent-server
-# endpoint directly with its own (broader) allowlist.
-ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc"}
+# Blocks arbitrary file writes (pentest 3.2.6 / #183).
+#
+# `.mcp.json` is allowlisted but its CONTENT is structure-validated by
+# `services.mcp_validator.validate_mcp_config` before the inject is
+# accepted (#598, Layer 2 of AISEC-C2 closure). Bare allowlisting is
+# sufficient for `.env` and `.credentials.enc` because their content is
+# either KEY=VALUE pairs or AES-GCM ciphertext — neither defines
+# executable behavior. `.mcp.json.template` remains BLOCKED because the
+# envsubst flow it feeds doesn't sanitize attacker-controlled JSON.
+ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
 
 
 # ============================================================================
@@ -206,6 +208,22 @@ async def inject_credentials(
             detail=f"Disallowed file path(s): {disallowed}. "
                    f"Allowed: {sorted(ALLOWED_CREDENTIAL_PATHS)}"
         )
+
+    # AISEC-C2 / #590 Layer 2 (#598): structure-validate .mcp.json content
+    # before forwarding to the agent. Closes the RCE-by-config bypass while
+    # restoring the legitimate post-deploy MCP server editing flow.
+    if ".mcp.json" in request_body.files:
+        try:
+            validate_mcp_config(request_body.files[".mcp.json"])
+        except McpValidationError as e:
+            logger.warning(
+                f".mcp.json injection blocked by validator for agent {agent_name} "
+                f"by user {current_user.email}: {e}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid .mcp.json: {e}",
+            )
 
     try:
         async with httpx.AsyncClient() as client:

@@ -71,26 +71,30 @@ class TestAisecC2ExactReproduction:
     ):
         """The pentest's alternate request: inject .mcp.json with attacker JSON.
 
-        Expected: 400 from the backend's tightened ALLOWED_CREDENTIAL_PATHS.
-        Pre-fix this returned 200 with the file written.
+        Expected: 400 with the validator's RCE-specific error message.
+        - Pre-#590: returned 200 with file written (the bypass).
+        - #590 only: returned 400 "Disallowed file path(s): ['.mcp.json']".
+        - #598 (current): returned 400 "Invalid .mcp.json: ... must be a
+          name, not a path" — content validation rejects the path-disguised
+          command before the agent is even contacted.
         """
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/credentials/inject",
             json={"files": {".mcp.json": _AISEC_PAYLOAD}},
         )
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        # No 503 skip — content validation runs before agent contact
         assert_status(response, 400)
         body = response.json()
-        assert "disallowed" in body.get("detail", "").lower()
-        assert ".mcp.json" in body.get("detail", "")
+        # The validator's specific error message for the AISEC-C2 payload
+        assert "Invalid .mcp.json" in body.get("detail", "")
+        assert "must be a name, not a path" in body.get("detail", "")
 
     def test_credentials_inject_mcp_json_template_blocked(
         self, api_client: TrinityApiClient, created_agent
     ):
-        """envsubst-only template doesn't sanitize: attacker injects without
-        ${VAR} references and the JSON survives unchanged into .mcp.json
-        on the next credential update. Same RCE, different file.
+        """`.mcp.json.template` stays blocked at the PATH layer (#598 only
+        re-allowed `.mcp.json`). The envsubst flow it feeds doesn't sanitize
+        attacker JSON, so the file path itself is rejected as disallowed.
         """
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/credentials/inject",
@@ -100,7 +104,7 @@ class TestAisecC2ExactReproduction:
             pytest.skip("Agent server not ready")
         assert_status(response, 400)
         body = response.json()
-        assert "disallowed" in body.get("detail", "").lower()
+        assert "Disallowed file path" in body.get("detail", "")
         assert ".mcp.json.template" in body.get("detail", "")
 
 
@@ -225,27 +229,30 @@ class TestCredentialsInjectAllowlist:
         assert_status(response, 200)
         assert ".credentials.enc" in response.json().get("files_written", [])
 
-    def test_env_plus_mcp_json_rejects_whole_batch(
+    def test_env_plus_evil_mcp_json_rejects_whole_batch(
         self, api_client: TrinityApiClient, created_agent
     ):
-        """One disallowed entry rejects the entire batch (transactional semantics).
-        Confirms attackers can't sneak .mcp.json through by bundling with .env.
+        """Mixed batch: legit `.env` + an `.mcp.json` whose CONTENT is
+        attacker-controlled. After #598 the `.mcp.json` path is allowed,
+        but content validation rejects the whole batch atomically. Neither
+        file is written.
+
+        (Empty `{"mcpServers": {}}` is now a valid config — the rejection
+        criterion shifted from path-layer to content-layer.)
         """
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/credentials/inject",
             json={
                 "files": {
                     ".env": "LEGIT_KEY=value\n",
-                    ".mcp.json": '{"mcpServers": {}}',
+                    ".mcp.json": '{"mcpServers": {"e": {"command": "/bin/sh"}}}',
                 }
             },
         )
-        # No 503 skip needed — the disallowed-path check runs before any
-        # agent-server proxy attempt
+        # No 503 skip — content validation runs before any agent-server proxy
         assert_status(response, 400)
         body = response.json()
-        # Backend reports which paths were rejected
-        assert ".mcp.json" in body.get("detail", "")
+        assert "Invalid .mcp.json" in body.get("detail", "")
 
     @pytest.mark.parametrize(
         "path",

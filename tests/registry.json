@@ -225,6 +225,13 @@
       "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
     },
     {
+      "file": "test_mcp_validator_endpoint.py",
+      "feature": "Issue #598 / AISEC-C2 Layer 2",
+      "added": "2026-04-30",
+      "categories": ["backend", "api", "security", "credentials", "mcp"],
+      "description": "Integration tests for .mcp.json content validation at the inject endpoint: AISEC-C2 still blocked (now via content validator), legit configs accepted (npx, uvx, Bearer ${TOKEN} headers, empty mcpServers), 11 parametrized bypass attempts (path-disguised commands, inline-exec flags, shell metachars, command substitution, reserved env refs, SSRF localhost/IMDS, http-not-https, userinfo URLs, reserved trinity name, unknown fields), .mcp.json.template still blocked at path layer, mixed-batch atomicity (.env + evil .mcp.json rejects whole batch). Pairs with tests/unit/test_mcp_validator.py (88 unit tests)."
+    },
+    {
       "file": "unit/test_web_file_upload.py",
       "feature": "Issue #364",
       "added": "2026-04-29",

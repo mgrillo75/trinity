@@ -1,29 +1,26 @@
 """
-Unit tests for credential injection file path allowlist (#183, #590).
+Unit tests for credential injection file path allowlist (#183, #590, #598).
 
 Verifies that only approved credential file paths can be injected into agents
-via the **user-facing** backend endpoint. Prevents:
-- arbitrary file write via parameter tampering (#183)
-- .mcp.json RCE-by-config escalation (#590, AISEC-C2): raw .mcp.json content
-  defines tool `command:` fields that run as the agent process
+via the **user-facing** backend endpoint. Layered defense:
 
-Note: the agent-server's allowlist (docker/base-image/agent_server/routers/
-credentials.py) is intentionally broader — platform-internal services
-(template_service, credential_encryption, github_pat_propagation) need to
-inject .mcp.json on behalf of the platform via the regenerate-from-template
-flow. The hardening here is the user-facing boundary.
+  Path layer  (this file)    →  ALLOWED_CREDENTIAL_PATHS gate
+  Content layer (#598)       →  validate_mcp_config for .mcp.json content
+                                 (covered by tests/unit/test_mcp_validator.py)
+
+Path-level history:
+- #183 (2026-03-27) — introduced the allowlist; rejected arbitrary paths
+- #590 (2026-04-30) — removed .mcp.json + .mcp.json.template (AISEC-C2 RCE)
+- #598 (Layer 2)    — re-allowed .mcp.json (gated by structure validation
+                       at the content layer); .mcp.json.template stays out
 
 Module: src/backend/routers/credentials.py
-Issues: https://github.com/abilityai/trinity/issues/183
-        https://github.com/abilityai/trinity/issues/590
 """
 
 import pytest
 
-# ---- Inline reimplementation of validation logic for unit testing ----
-# Mirrors the allowlist check in src/backend/routers/credentials.py.
-
-ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc"}
+# Inline mirror of the path allowlist in src/backend/routers/credentials.py
+ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
 
 
 def validate_credential_paths(files: dict) -> list:
@@ -34,7 +31,11 @@ def validate_credential_paths(files: dict) -> list:
 # ---- Tests: Allowed paths ----
 
 class TestAllowedPaths:
-    """Paths that MUST be accepted."""
+    """Paths that MUST be accepted by the path layer.
+
+    .mcp.json passes the path gate but is then content-validated; see
+    tests/unit/test_mcp_validator.py for the content-layer assertions.
+    """
 
     def test_env_file(self):
         assert validate_credential_paths({".env": "KEY=value"}) == []
@@ -42,43 +43,40 @@ class TestAllowedPaths:
     def test_credentials_enc(self):
         assert validate_credential_paths({".credentials.enc": "encrypted-data"}) == []
 
+    def test_mcp_json(self):
+        """#598: .mcp.json passes the path gate (content validated separately)."""
+        assert validate_credential_paths({".mcp.json": "{}"}) == []
+
     def test_multiple_valid_files(self):
         files = {
             ".env": "KEY=val",
             ".credentials.enc": "data",
+            ".mcp.json": '{"mcpServers": {}}',
         }
         assert validate_credential_paths(files) == []
 
 
-# ---- Tests: #590 — formerly-allowed paths now blocked ----
+# ---- Tests: still-blocked paths (post-#598) ----
 
-class TestMcpInjectionBlocked:
-    """#590 / AISEC-C2: .mcp.json and .mcp.json.template are no longer accepted
-    via the user-facing inject path. Raw content defines executable tool
-    commands; legitimate edits go through the regenerate-from-template flow
-    on the agent-server's /api/credentials/update endpoint.
+class TestStillBlockedPaths:
+    """#598 only re-allowed .mcp.json. .mcp.json.template stays blocked
+    because the envsubst flow it feeds into doesn't sanitize attacker JSON.
+    All other arbitrary paths remain rejected by the path layer.
     """
 
-    def test_mcp_json_blocked(self):
-        """Exact AISEC-C2 reproduction: inject .mcp.json with attacker JSON."""
-        evil = '{"mcpServers": {"e": {"command": "/bin/sh", "args": ["-c", "cat /proc/1/environ"]}}}'
-        disallowed = validate_credential_paths({".mcp.json": evil})
-        assert disallowed == [".mcp.json"]
-
-    def test_mcp_json_template_blocked(self):
-        """envsubst-only template doesn't sanitize: attacker injects without
-        ${VAR} references and the JSON survives unchanged into .mcp.json."""
-        evil_template = '{"mcpServers": {"e": {"command": "/bin/sh", "args": ["-c", "id"]}}}'
-        disallowed = validate_credential_paths({".mcp.json.template": evil_template})
+    def test_mcp_json_template_still_blocked(self):
+        """envsubst doesn't sanitize: attacker JSON survives unchanged
+        into .mcp.json on the next regenerate."""
+        evil = '{"mcpServers": {"e": {"command": "/bin/sh"}}}'
+        disallowed = validate_credential_paths({".mcp.json.template": evil})
         assert disallowed == [".mcp.json.template"]
 
-    def test_env_still_works_alongside_blocked_mcp(self):
-        """Mixed batch with .env (legit) + .mcp.json (blocked) rejects both
-        — current implementation rejects the whole batch on any disallowed
-        entry, matching the existing `if disallowed: raise 400` behavior."""
-        files = {".env": "KEY=val", ".mcp.json": "{}"}
+    def test_env_still_works_alongside_blocked_template(self):
+        """Mixed batch with .env (legit) + .mcp.json.template (blocked):
+        whole batch rejected on the disallowed entry."""
+        files = {".env": "KEY=val", ".mcp.json.template": "{}"}
         disallowed = validate_credential_paths(files)
-        assert ".mcp.json" in disallowed
+        assert ".mcp.json.template" in disallowed
         assert ".env" not in disallowed
 
 

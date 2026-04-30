@@ -432,9 +432,16 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 
 1. **Encryption Key**: AES-256-GCM key derived from `CREDENTIAL_ENCRYPTION_KEY` env var or JWT secret. The `GET /credentials/encryption-key` endpoint is admin-only (C-001, 2026-03-09).
 2. **Agent Access Control**: All credential endpoints (`inject`, `export`, `import`, `status`) require `get_owned_agent_by_name` dependency — only agent owners and admins can manage credentials (M-006 upgraded to owner-only in #174, 2026-03-26).
-3. **File Path Allowlist** (pentest 3.2.6 / #183 + AISEC-C2 / #590):
-   - **Backend (user-facing)** — `ALLOWED_CREDENTIAL_PATHS = {.env, .credentials.enc}`. Tightened by #590 (2026-04-30): `.mcp.json` and `.mcp.json.template` removed from the user-facing inject path because raw content of either is RCE-by-config — tool `command:` fields run as the agent process. Owners change MCP servers via the agent-creation template or via the platform-internal `/api/credentials/update` regenerate-from-template flow (which uses envsubst on platform-controlled keys only). Requests with any other path are rejected with HTTP 400.
-   - **Agent-server (platform-internal)** — `ALLOWED_CREDENTIAL_PATHS = {.env, .mcp.json, .mcp.json.template, .credentials.enc}`. Intentionally broader so platform services (`template_service`, `credential_encryption`, `github_pat_propagation`) can write `.mcp.json` on behalf of the platform. Reachable only on the internal Docker network; cross-tenant exposure tracked separately in #589 (Redis no-auth) and the upcoming Layer 2 structured MCP-server endpoint.
+3. **File Path Allowlist + Content Validation** (pentest 3.2.6 / #183 + AISEC-C2 / #590 / #598):
+   - **Backend (user-facing) — path layer** — `ALLOWED_CREDENTIAL_PATHS = {.env, .credentials.enc, .mcp.json}`. `.mcp.json.template` stays blocked because the envsubst flow it feeds doesn't sanitize attacker JSON. Requests with any other path are rejected with HTTP 400.
+   - **Backend (user-facing) — content layer** (#598, Layer 2 of AISEC-C2 closure) — `.mcp.json` content is structure-validated by `services.mcp_validator.validate_mcp_config` before forwarding to the agent. Validates:
+     - Server names: `^[a-zA-Z0-9_-]{1,64}$`, `trinity` reserved (auto-injected entry — can't be clobbered)
+     - Stdio transport: `command` ∈ allowlist `{npx, uvx, python, python3, node, bun, deno, docker}`, no path separators, ASCII-only; args without shell metacharacters; no inline-exec flags (`-c`/`--eval`/`-p`/`eval`) as first positional
+     - http/sse transport: HTTPS only, no userinfo, hostname must NOT resolve to private/loopback/link-local (SSRF guard mirroring #179); header names from a small allowlist
+     - env values: `${VAR}` references with valid POSIX-shape names, NOT in `RESERVED_ENV_REFS` (PATH, LD_PRELOAD, PYTHONPATH, TRINITY_MCP_API_KEY, etc.); literal substrings checked for shell metachars and credential patterns from `guardrails-baseline.json`
+     - Closed schema: only `command/args/env/url/headers/type` keys allowed; only `mcpServers` at the root
+     - Bounded: 64KB content cap, 32 servers max, 64 args max, 4096-char env values
+   - **Agent-server (platform-internal)** — `ALLOWED_CREDENTIAL_PATHS = {.env, .mcp.json, .mcp.json.template, .credentials.enc}`. Intentionally broader so platform services (`template_service`, `credential_encryption`, `github_pat_propagation`) can write `.mcp.json` on behalf of the platform. Reachable only on the internal Docker network; cross-tenant exposure tracked separately in #589 (Redis no-auth).
 4. **File Permissions**: All credential files written with 600 permissions (owner read/write only)
 5. **Internal API**: `/api/internal/*` endpoints require `X-Internal-Secret` header (C-003, 2026-03-09)
 6. **No Secret Logging**: Credential values never logged, only file names and counts
