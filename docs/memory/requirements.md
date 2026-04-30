@@ -1048,8 +1048,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 ## 16. Advanced Features
 
 ### 16.1 Agent Resource Allocation
-- **Status**: ✅ Implemented (2026-01-02)
-- **Description**: Per-agent memory and CPU configuration
+- **Status**: ✅ Implemented (2026-01-02; RES-001 system defaults 2026-04-30)
+- **Description**: Per-agent memory and CPU configuration; system-wide admin defaults as fleet-level ceiling
+- **Key Features**: 3-tier fallback (per-agent DB override → system default → hardcoded safe value); admin `GET/PUT /api/settings/agent-defaults/resources`; CPU as whole processors (1/2/4/8/16); memory as Docker-native strings (1g–32g)
 - **Flow**: `docs/memory/feature-flows/agent-resource-allocation.md`
 
 ### 16.1a Read-Only Mode
