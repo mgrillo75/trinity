@@ -4,7 +4,7 @@ Thank you for your interest in contributing to Trinity! This document provides g
 
 ## License
 
-By contributing to Trinity, you agree that your contributions will be licensed under the [Polyform Noncommercial License 1.0.0](LICENSE).
+Trinity is licensed under the [Apache License 2.0](LICENSE). Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Trinity by you shall be licensed under the Apache License 2.0, without any additional terms or conditions (per Section 5 of the license).
 
 ## Code of Conduct
 

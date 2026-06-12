@@ -89,4 +89,4 @@ trinity agents list --format json
 
 ## License
 
-MIT
+Apache-2.0

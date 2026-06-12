@@ -27,7 +27,7 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 | Agent SSH ports | 2222+ (incrementing per agent) |
 | Required agent files | `CLAUDE.md` (agent instructions), `template.yaml` (metadata); optional `.env.example`, `.mcp.json.template` |
 | Persistence | SQLite at `~/trinity-data/trinity.db` (host bind mount); Redis for transient state |
-| License | Polyform Noncommercial — free for non-commercial use; commercial use requires a license |
+| License | Apache 2.0 — free for any use, commercial included |
 
 ## Stand up a Trinity instance
 

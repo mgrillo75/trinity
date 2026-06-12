@@ -202,12 +202,12 @@ For advanced topics, explore the main documentation:
 - **API Reference**: Interactive API docs at `http://localhost:8000/docs`
 
 ### 🤝 Contribute
-Trinity is open source under the Polyform Noncommercial License. We welcome contributions!
+Trinity is open source under the Apache License 2.0. We welcome contributions!
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
 
-### 🏢 Commercial Use
-For commercial licensing, contact hello@ability.ai
+### 🏢 Enterprise
+For enterprise modules and support, contact hello@ability.ai
 
 ---
 

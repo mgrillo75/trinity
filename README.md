@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/abilityai/trinity/stargazers"><img src="https://img.shields.io/github/stars/abilityai/trinity?style=flat" alt="Stars"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Polyform%20NC-blue.svg" alt="License: Polyform NC"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://pypi.org/project/trinity-cli/"><img src="https://img.shields.io/pypi/v/trinity-cli?label=CLI&color=blue" alt="CLI"></a>
   <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
   <img src="https://img.shields.io/badge/vue-3.x-green.svg" alt="Vue">
@@ -33,7 +33,7 @@ Trinity is the production runtime for your AI agents — governed, auditable, on
 
 Each agent runs in its own isolated Docker container with real-time observability, fleet-wide scheduling, agent-to-agent delegation, and a tamper-evident audit trail. Self-host it, or run it on any cloud you control.
 
-> Source-available · **Polyform Noncommercial** — free for non-commercial use; commercial use needs a commercial license and deploys anywhere you run it · Independently pentested — **UnderDefense Grade A** · We run Trinity in production ourselves — and so do our customers.
+> Open source · **Apache 2.0** — free for any use, commercial included, and deploys anywhere you run it · Independently pentested — **UnderDefense Grade A** · We run Trinity in production ourselves — and so do our customers.
 
 > 🤖 **AI agent reading this repo?** Start at [AGENTS.md](AGENTS.md) — a task router with exact commands, key facts, and verification steps. Detailed docs index: [docs/user-docs/README.md](docs/user-docs/README.md).
 
@@ -690,17 +690,9 @@ git push origin cli-v1.0.0
 
 ## License
 
-This project is licensed under the [Polyform Noncommercial License 1.0.0](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE) — free for any use, commercial included, with an explicit patent grant. Run it on your own infrastructure, any cloud, or a managed instance.
 
-**Free for**:
-- Personal use
-- Research and education
-- Non-profit organizations
-- Hobby projects
-
-**Commercial use** requires a separate license — which you can run on your own infrastructure, any cloud, or a managed instance. Contact [hello@ability.ai](mailto:hello@ability.ai) for commercial licensing.
-
-> Trinity is **source-available** under Polyform Noncommercial — not an OSI open-source license. The source is public and free for the non-commercial uses above; commercial use needs a license.
+Optional **enterprise modules** (SSO, user management, SIEM export, and more) are available under a separate commercial license. Contact [hello@ability.ai](mailto:hello@ability.ai) for enterprise licensing.
 
 ## Contributing
 

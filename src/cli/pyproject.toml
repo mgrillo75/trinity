@@ -7,7 +7,7 @@ name = "trinity-cli"
 version = "0.0.0"  # Replaced at build time by CI (auto-publishes on push to main)
 description = "CLI for the Trinity Autonomous Agent Orchestration Platform"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     {name = "Ability AI", email = "hello@ability.ai"},

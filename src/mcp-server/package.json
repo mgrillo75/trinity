@@ -18,7 +18,7 @@
     "orchestration"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "fastmcp": "^3.32.0",
     "zod": "^3.24.1"
